@@ -1,0 +1,13 @@
+p1_id: 506
+p2_id:
+  - 507
+  # - 510
+
+pc_path: "/media/dl/data_pc/data_demo/MotionSeg3D/data/sequences/09/velodyne/" #scans_506.bin
+poses_path: "/media/dl/data_pc/data_demo/MotionSeg3D/data/sequences/09/poses.txt"
+calib_path: "/media/dl/data_pc/data_demo/MotionSeg3D/data/sequences/09/calib.txt"
+# dis_threshold: 0.05
+# var_threshold: 0.03
+dis_threshold: 1.2
+var_threshold: 1.2
+horizon_threshold: 75 # 和水平面的夹角
