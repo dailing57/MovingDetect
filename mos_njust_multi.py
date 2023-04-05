@@ -4,6 +4,7 @@ import torch
 import math
 from models.flowstep3d import FlowStep3D
 import yaml
+import matplotlib.pyplot as plt
 
 device = torch.device('cuda')
 
@@ -123,9 +124,15 @@ def PCA(data):
     eigenvectors = eigenvectors[:, sort]
     return eigenvalues, eigenvectors
 
+def gen_hist(distance_list, title = ''):
+    plt.hist(distance_list, bins=100)
+    plt.title(title)
+    plt.show()
+
 def gen_horizon_mos_mask(label_sf, horizon_threshold):
     mask_horizon = np.ones(max(label_sf.keys()) + 1)
     for label_id in label_sf:
+        if label_id < 0: continue
         w, v = PCA(np.array(label_sf[label_id]))
         w = w / np.sum(w)
         v1 = w[0] * v[:, 0]
@@ -142,17 +149,21 @@ def gen_horizon_mos_mask(label_sf, horizon_threshold):
 def gen_var_mask(label_sf, var_threshold):
     label_sf_var = np.zeros(max(label_sf.keys()) + 1)
     for label_id in label_sf:
-        label_sf_var[label_id] = np.var(label_sf[label_id])
-    # print(sorted(label_sf_var))
+        if label_id < 0: continue
+        label_sf_var[label_id] = np.sum(np.var(label_sf[label_id], axis=1))
+    gen_hist(label_sf_var, 'var')
     mean_var = np.mean(label_sf_var)
+    print(mean_var)
     return label_sf_var < var_threshold * mean_var
 
 def gen_dis_mask(label_sf, dis_threshold):
     label_sf_dis = np.zeros(max(label_sf.keys()) + 1)
     for label_id in label_sf:
-        label_sf_dis[label_id] = np.linalg.norm(np.mean(label_sf[label_id]))
-    # print(sorted(label_sf_dis))
+        if label_id < 0: continue
+        label_sf_dis[label_id] = np.linalg.norm(np.mean(label_sf[label_id], axis=1))
+    gen_hist(label_sf_dis, 'dis')
     mean_norm = np.mean(label_sf_dis)
+    print(mean_norm)
     return label_sf_dis > dis_threshold * mean_norm
 
 def run(cfg_file = 'gen_mos.yaml'):
@@ -184,6 +195,7 @@ def run(cfg_file = 'gen_mos.yaml'):
         pc2_normals = np.array(pcd2.normals)
         pc2 = pre_process(pc2, pc2_normals)
         sf = flow_infer(pc1, pc2)
+        # gen_hist(np.linalg.norm(sf, axis=1))
         label_sf, label_pt = gather_pt(sf, labels, pc1)
 
         mask_dis = gen_dis_mask(label_sf, cfg['dis_threshold'])

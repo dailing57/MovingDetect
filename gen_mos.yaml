@@ -1,6 +1,6 @@
 p1_id: 506
 p2_id:
-  - 507
+  - 505
   # - 510
 
 pc_path: "/media/dl/data_pc/data_demo/MotionSeg3D/data/sequences/09/velodyne/" #scans_506.bin
