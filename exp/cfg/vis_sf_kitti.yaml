@@ -1,0 +1,11 @@
+p1_id: 50
+p2_id: 45
+
+checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-03-25_23-12/epoch=18.ckpt"
+
+pc_path: "/media/dl/data_pc/semanticKITTI/sequences/08/velodyne/"
+poses_path: "/media/dl/data_pc/semanticKITTI/sequences/08/poses.txt"
+calib_path: "/media/dl/data_pc/semanticKITTI/sequences/08/calib.txt"
+
+dis_threshold: 0.2
+theta_threshold: 90

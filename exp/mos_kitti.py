@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import open3d as o3d
 import numpy as np
 import torch
@@ -58,7 +62,6 @@ pc2 = pc2[pc2[:, 2] > -1.4]
 pc1 = torch.tensor(pc1[:,:3]).to(torch.float).unsqueeze(0).to(device)
 pc2 = torch.tensor(pc2[:,:3]).to(torch.float).unsqueeze(0).to(device)
 
-config = yaml.safe_load(open('configs/test/flowstep3d_sv.yaml'))
 checkpoint = torch.load('/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-03-25_23-12/epoch=18.ckpt')
 model = FlowStep3D(**checkpoint["hyper_parameters"])
 model_weights = checkpoint["state_dict"]

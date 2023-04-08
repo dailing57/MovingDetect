@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import open3d as o3d
 import numpy as np
 import torch
@@ -5,6 +9,10 @@ import math
 from models.flowstep3d import FlowStep3D
 import yaml
 import matplotlib.pyplot as plt
+
+cmap = plt.colormaps.get_cmap('rainbow')
+def get_color(c):
+    return cmap(c)[:3]
 
 device = torch.device('cuda')
 
@@ -87,11 +95,11 @@ def cluster(pcd):
                 labels[planes_idx[j]] = labels[planes_idx[i][0]]
     return labels
 
-def flow_infer(pc1_in, pc2_in):
+def flow_infer(pc1_in, pc2_in, checkpoint_path):
     pc1 = torch.tensor(pc1_in[:,:3]).to(torch.float).unsqueeze(0).to(device)
     pc2 = torch.tensor(pc2_in[:,:3]).to(torch.float).unsqueeze(0).to(device)
 
-    checkpoint = torch.load('/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-04-04_15-33/epoch=3.ckpt')
+    checkpoint = torch.load(checkpoint_path)
     model = FlowStep3D(**checkpoint["hyper_parameters"])
     model_weights = checkpoint["state_dict"]
     for key in list(model_weights):
@@ -151,7 +159,7 @@ def gen_var_mask(label_sf, var_threshold):
     for label_id in label_sf:
         if label_id < 0: continue
         label_sf_var[label_id] = np.sum(np.var(label_sf[label_id], axis=1))
-    gen_hist(label_sf_var, 'var')
+    # gen_hist(label_sf_var, 'var')
     mean_var = np.mean(label_sf_var)
     print(mean_var)
     return label_sf_var < var_threshold * mean_var
@@ -161,12 +169,46 @@ def gen_dis_mask(label_sf, dis_threshold):
     for label_id in label_sf:
         if label_id < 0: continue
         label_sf_dis[label_id] = np.linalg.norm(np.mean(label_sf[label_id], axis=1))
-    gen_hist(label_sf_dis, 'dis')
+    # gen_hist(label_sf_dis, 'dis')
     mean_norm = np.mean(label_sf_dis)
     print(mean_norm)
     return label_sf_dis > dis_threshold * mean_norm
 
-def run(cfg_file = 'gen_mos.yaml'):
+def vis_flow(pc1, pc2, sf):
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
+
+    coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0,0,0])
+    vis.add_geometry(coord)
+
+    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc1))
+    pcd1.paint_uniform_color([0.25,0.25,0.25])
+    vis.add_geometry(pcd1)
+    # pcd2 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc2))
+    # pcd2.paint_uniform_color([0,0,1])
+    # vis.add_geometry(pcd2)
+    pcdm = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc1 + sf))
+    pcdm.paint_uniform_color([0,1,0])
+    vis.add_geometry(pcdm)
+
+    dis = np.linalg.norm(sf, axis=1)
+    max_dis = np.max(dis)
+
+    pt, st, colors = [], [], []
+    for i in range(len(pc1)):
+        pt.append(pc1[i])
+        pt.append(pc1[i] + sf[i])
+        st.append([2 * i, 2 * i + 1])
+        colors.append(get_color(dis[i] / max_dis))
+    line_set = o3d.geometry.LineSet()
+    line_set.points = o3d.utility.Vector3dVector(np.asarray(pt))
+    line_set.lines = o3d.utility.Vector2iVector(np.asarray(st))
+    line_set.colors = o3d.utility.Vector3dVector(np.asarray(colors))
+    vis.add_geometry(line_set)
+    vis.run()
+    vis.destroy_window()
+
+def run(cfg_file = 'cfg/vis_sf_kitti.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
@@ -177,49 +219,28 @@ def run(cfg_file = 'gen_mos.yaml'):
     poses = load_poses(cfg['poses_path'])
     calib = load_calib(cfg['calib_path'])
     # pc1 = (poses[p1_id] @ calib @ pc1.T).T
-    # pc2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[p2_id] @ calib @ pc2.T).T
-    pc1 = load_vertex(pc_path + f'scans_{p1_id}.bin')[:, :3]
+    pc1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
+    pc2 = load_vertex(pc_path + f'{p2_id:06d}.bin')
+    pc2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[p2_id] @ calib @ pc2.T).T
+    pc1 = pc1[:, :3]
+    pc2 = pc2[:, :3]
     pcd1 = o3d.geometry.PointCloud()
     pcd1.points = o3d.utility.Vector3dVector(pc1)
     pcd1.estimate_normals()
     pc1_normals = np.array(pcd1.normals)
     pc1 = pre_process(pc1, pc1_normals)
     pcd1.points = o3d.utility.Vector3dVector(pc1)
-    labels = cluster(pcd1)
-    mask = np.zeros(len(pc1))
-    for idx in p2_id:
-        pc2 = load_vertex(pc_path + f'scans_{idx}.bin')[:, :3]
-        pcd2 = o3d.geometry.PointCloud()
-        pcd2.points = o3d.utility.Vector3dVector(pc2)
-        pcd2.estimate_normals()
-        pc2_normals = np.array(pcd2.normals)
-        pc2 = pre_process(pc2, pc2_normals)
-        sf = flow_infer(pc1, pc2)
-        # gen_hist(np.linalg.norm(sf, axis=1))
-        label_sf, label_pt = gather_pt(sf, labels, pc1)
 
-        mask_dis = gen_dis_mask(label_sf, cfg['dis_threshold'])
-        mask_horizon = gen_horizon_mos_mask(label_sf, cfg['horizon_threshold'])
-        mask_var = gen_var_mask(label_sf, cfg['var_threshold'])
+    pcd2 = o3d.geometry.PointCloud()
+    pcd2.points = o3d.utility.Vector3dVector(pc2)
+    pcd2.estimate_normals()
+    pc2_normals = np.array(pcd2.normals)
+    pc2 = pre_process(pc2, pc2_normals)
+    sf = flow_infer(pc1, pc2, cfg['checkpoint'])
 
-        for i in range(len(pc1)):
-            if(labels[i] >=0
-               and mask_dis[labels[i]] == 1
-               and mask_var[labels[i]] == 1
-               and mask_horizon[labels[i]] == 1
-            ):
-                mask[i] += 1
+    vis_flow(pc1, pc2, sf)
 
-    tot = len(p2_id)
-    colors = []
-    for i in range(len(pc1)):
-        if(mask[i] > 0):
-            colors.append([1, 0, 0])
-        else:
-            colors.append([0, 0, 1])
 
-    pcd1.colors = o3d.utility.Vector3dVector(colors)
-    o3d.visualization.draw_geometries([pcd1])
 
 if __name__ == '__main__':
     run()

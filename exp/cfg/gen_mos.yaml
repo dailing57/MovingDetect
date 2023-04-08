@@ -8,6 +8,6 @@ poses_path: "/media/dl/data_pc/data_demo/MotionSeg3D/data/sequences/09/poses.txt
 calib_path: "/media/dl/data_pc/data_demo/MotionSeg3D/data/sequences/09/calib.txt"
 # dis_threshold: 0.05
 # var_threshold: 0.03
-dis_threshold: 1.2
+dis_threshold: 0.5
 var_threshold: 1.2
 horizon_threshold: 75 # 和水平面的夹角
