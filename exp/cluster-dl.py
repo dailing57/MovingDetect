@@ -7,7 +7,7 @@ def are_same_plane(plane1, plane2, tolerance):
     a2, b2, c2, d2 = plane2
     
     dot_product = a1*a2 + b1*b2 + c1*c2
-    if abs(dot_product) < 1 - 0.1:
+    if abs(dot_product) < 0.85:
         return False
     
     dist = abs(d1 - d2) / math.sqrt(a1**2 + b1**2 + c1**2)
@@ -19,7 +19,7 @@ def are_same_plane(plane1, plane2, tolerance):
 
 np.random.seed(57)
 # 读取点云
-data_path = '/media/dl/data_pc/semanticKITTI/sequences/08/velodyne/000050.bin'
+data_path = '/media/dl/data_pc/semanticKITTI/sequences/08/velodyne/000098.bin'
 def load_vertex(scan_path):
     current_vertex = np.fromfile(scan_path, dtype=np.float32).reshape((-1, 4))
     current_vertex[:,3] = np.ones(current_vertex.shape[0])
@@ -62,14 +62,14 @@ for i in range(max_label + 1):
     # 根据索引获取当前平面的点云
     cloud = pcd.select_by_index(indices)
     # 拟合平面
-    [a, b, c, d], idx = cloud.segment_plane(0.1, 3, 10)
+    [a, b, c, d], idx = cloud.segment_plane(0.3, 3, 10)
     planes_idx.append(indices[idx])
     planes_arg.append([a,b,c,d])
 
 for i in range(len(planes_arg)):
     for j in range(i + 1, len(planes_arg)):
         if labels[planes_idx[j][0]] == labels[planes_idx[i][0]]: continue
-        if(are_same_plane(planes_arg[i], planes_arg[j], 0.2)):
+        if(are_same_plane(planes_arg[i], planes_arg[j], 0.3)):
             labels[planes_idx[j]] = labels[planes_idx[i][0]]
 
 color_map = [np.random.uniform(0.25, 1, 3) for _ in range(max(labels) + 1)]

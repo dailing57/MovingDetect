@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 
 device = torch.device('cuda')
 
+np.random.seed(57)
 def str_to_trans(poses):
     return np.vstack((np.fromstring(poses, dtype=float, sep=' ').reshape(3, 4), [0, 0, 0, 1]))
 
@@ -38,17 +39,15 @@ def load_vertex(scan_path):
     return current_vertex
 
 def pre_process(pc, pc_normals):
-    is_not_ground = (pc[:, 2] > -1.4)
-    pc = pc[is_not_ground]
-    pc_normals = pc_normals[is_not_ground]
-
-    horizontal_normals = np.abs(pc_normals[:, -1]) < .85
-    pc = pc[horizontal_normals]
-
+    is_not_ground = (pc[:, 2] > -1.5)
+    horizontal_normals = (np.abs(pc_normals[:, -1]) > .85) & (pc[:, 2] < -1.0)
     is_near = (np.amax(np.abs(pc), axis=1) < 35)
-    pc = pc[is_near]
+    mask = is_not_ground & (~horizontal_normals) & is_near
+    ori_idx = np.arange(len(pc))[mask]
 
-    return pc
+    pc = pc[ori_idx]
+
+    return pc, ori_idx
 
 def are_same_plane(plane1, plane2, tolerance):
     a1, b1, c1, d1 = plane1
@@ -109,19 +108,25 @@ def flow_infer(pc1_in, pc2_in):
 
     return sf[-1].cpu().detach().numpy().reshape(-1, 3)
 
-def gather_pt(sf, labels, pc1):
-    label_sf, label_pt, label_pt_id = {}, {}, {}
+def gather_sf(sf, labels):
+    label_sf = {}
     for i in range(len(labels)):
         if labels[i] not in label_sf:
             label_sf[labels[i]] = [sf[i]]
+        else:
+            label_sf[labels[i]].append(sf[i])
+    return label_sf
+
+def gather_label(labels, pc1):
+    label_pt, label_pt_id = {}, {}
+    for i in range(len(labels)):
+        if labels[i] not in label_pt:
             label_pt[labels[i]] = [pc1[i]]
             label_pt_id[labels[i]] = [i]
         else:
-            label_sf[labels[i]].append(sf[i])
             label_pt[labels[i]].append(pc1[i])
             label_pt_id[labels[i]]. append(i)
-            
-    return label_sf, label_pt, label_pt_id
+    return label_pt, label_pt_id
 
 def PCA(data):
     H = np.dot(data.T,data)
@@ -186,9 +191,10 @@ def run(cfg_file = 'cfg/flowsegv2.yaml'):
     pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
     pcd1.estimate_normals()
     pc1_normals = np.array(pcd1.normals)
-    pc1 = pre_process(pchom1[:, :3], pc1_normals)
+    pc1, ori_idx = pre_process(pchom1[:, :3], pc1_normals)
     pcd1.points = o3d.utility.Vector3dVector(pc1)
     labels = cluster(pcd1)
+    label_pt, label_pt_id = gather_label(labels, pc1)
     mask = np.zeros(len(pc1))
     for idx in p2_id:
         pchom2 = load_vertex(pc_path + f'{idx:06d}.bin')
@@ -197,10 +203,10 @@ def run(cfg_file = 'cfg/flowsegv2.yaml'):
         pcd2.estimate_normals()
         pc2_normals = np.array(pcd2.normals)
         pc2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
-        pc2 = pre_process(pc2[:, :3], pc2_normals)
+        pc2, _ = pre_process(pc2[:, :3], pc2_normals)
         sf = flow_infer(pc1, pc2)
         # gen_hist(np.linalg.norm(sf, axis=1))
-        label_sf, label_pt, label_pt_id = gather_pt(sf, labels, pc1)
+        label_sf = gather_sf(sf, labels)
 
         mask_pca = gen_pca_mask(label_sf, label_pt_id, sf, cfg['theta_threshold'],cfg['dis_threshold'])
 
@@ -209,12 +215,28 @@ def run(cfg_file = 'cfg/flowsegv2.yaml'):
                 mask[i] += 1
 
     tot = len(p2_id)
-    colors = []
-    for i in range(len(pc1)):
-        if(mask[i] == tot):
-            colors.append([1, 0, 0])
-        else:
-            colors.append([0.25, 0.25, 0.25])
+
+    is_mos_cur = np.zeros(len(pc1))
+    for i in label_pt_id:
+        if i < 0: continue
+        if len(label_pt_id[i]) >= 30 and np.sum(mask[label_pt_id[i]]) / (tot * len(label_pt_id[i])) > 0.9:
+            is_mos_cur[label_pt_id[i]] = 1
+
+    pcd1 = o3d.geometry.PointCloud()
+    pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
+    cloud_tree = o3d.geometry.KDTreeFlann(pcd1)
+    is_mos_ori = np.zeros(len(pchom1))
+    colors = np.array([[0.25, 0.25, 0.25] for i in range(len(pchom1))])
+    for i in range(len(ori_idx)):
+        if(is_mos_cur[i] == 1):
+            is_mos_ori[ori_idx[i]] = 1
+            colors[ori_idx[i]] = [1, 0, 0]
+            [_, idx, _] = cloud_tree.search_radius_vector_3d(pcd1.points[ori_idx[i]], 0.2)
+            is_mos_ori[idx] = 1
+            colors[idx] = [1, 0, 0]
+
+
+
     pcd1.colors = o3d.utility.Vector3dVector(np.array(colors))
     vis = o3d.visualization.Visualizer()
     vis.create_window()

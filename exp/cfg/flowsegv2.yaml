@@ -1,9 +1,9 @@
-p1_id: 50
+p1_id: 98
 p2_id:
-  - 49
-  - 45
+  # - 97
+  - 94
 
-checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-03-25_23-12/epoch=18.ckpt"
+checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-04-07_00-56/last.ckpt"
 
 pc_path: "/media/dl/data_pc/semanticKITTI/sequences/08/velodyne/"
 poses_path: "/media/dl/data_pc/semanticKITTI/sequences/08/poses.txt"
