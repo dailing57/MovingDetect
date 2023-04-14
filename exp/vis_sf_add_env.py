@@ -8,12 +8,14 @@ import torch
 import math
 from models.flowstep3d import FlowStep3D
 import yaml
-from PIL import Image
 import matplotlib.pyplot as plt
+
+cmap = plt.colormaps.get_cmap('rainbow')
+def get_color(c):
+    return cmap(c)[:3]
 
 device = torch.device('cuda')
 
-np.random.seed(57)
 def str_to_trans(poses):
     return np.vstack((np.fromstring(poses, dtype=float, sep=' ').reshape(3, 4), [0, 0, 0, 1]))
 
@@ -38,6 +40,52 @@ def load_vertex(scan_path):
     current_vertex[:,3] = np.ones(current_vertex.shape[0])
     return current_vertex
 
+def pre_process(pc, seg):
+    ori_idx = np.arange(len(pc))[seg < 8]
+    pc = pc[ori_idx]
+    return pc, ori_idx
+
+def are_same_plane(plane1, plane2, tolerance):
+    a1, b1, c1, d1 = plane1
+    a2, b2, c2, d2 = plane2
+    
+    dot_product = a1*a2 + b1*b2 + c1*c2
+    if abs(dot_product) < 1 - 0.1:
+        return False
+    
+    dist = abs(d1 - d2) / math.sqrt(a1**2 + b1**2 + c1**2)
+    
+    if dist <= tolerance:
+        return True
+    else:
+        return False
+    
+def cluster(pcd):
+    labels = np.asarray(pcd.cluster_dbscan(eps=0.55, min_points=10))
+    max_label = max(labels)
+    print(max_label)
+    planes_idx = []
+    planes_arg = []
+    for i in range(max_label + 1):
+        # 获取当前平面的索引
+        indices = np.where(labels == i)[0]
+
+        if(len(indices) < 10): continue
+
+        # 根据索引获取当前平面的点云
+        cloud = pcd.select_by_index(indices)
+
+        # 拟合平面
+        [a, b, c, d], idx = cloud.segment_plane(0.1, 3, 10)
+        planes_idx.append(indices[idx])
+        planes_arg.append([a,b,c,d])
+
+    for i in range(len(planes_arg)):
+        for j in range(i + 1, len(planes_arg)):
+            if labels[planes_idx[j][0]] == labels[planes_idx[i][0]]: continue
+            if(are_same_plane(planes_arg[i], planes_arg[j], 0.2)):
+                labels[planes_idx[j]] = labels[planes_idx[i][0]]
+    return labels
 
 def flow_infer(pc1_in, pc2_in,ckpt_path, seg1, seg2):
     checkpoint = torch.load(ckpt_path)
@@ -71,42 +119,18 @@ def flow_infer(pc1_in, pc2_in,ckpt_path, seg1, seg2):
     res_sf[cur_idx_1[labels1 >= 0]] = cur_sf[-1].cpu().detach().numpy()
     return res_sf
 
-def gather_sf(sf, labels):
-    label_sf = {}
+
+def gather_pt(sf, labels, pc1):
+    label_sf, label_pt = {}, {}
     for i in range(len(labels)):
         if labels[i] not in label_sf:
             label_sf[labels[i]] = [sf[i]]
+            label_pt[labels[i]] = [pc1[i]]
         else:
             label_sf[labels[i]].append(sf[i])
-    return label_sf
-
-def gather_label(labels, pc1):
-    label_pt, label_pt_id = {}, {}
-    for i in range(len(labels)):
-        if labels[i] not in label_pt:
-            label_pt[labels[i]] = [pc1[i]]
-            label_pt_id[labels[i]] = [i]
-        else:
             label_pt[labels[i]].append(pc1[i])
-            label_pt_id[labels[i]]. append(i)
-    return label_pt, label_pt_id
 
-
-def cluster(pc, seg):
-    ori_idx = np.arange(len(pc))[seg < 8]
-    pc = pc[ori_idx]
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pc)
-    labels = np.asarray(pcd.cluster_dbscan(eps=0.55, min_points=10))
-    labels_ids = {}
-    for i in range(len(labels)):
-        if labels[i] < 0: continue
-        if labels[i] not in labels_ids:
-            labels_ids[labels[i]] = [i]
-        else:
-            labels_ids[labels[i]].append(ori_idx[i])
-    return labels_ids
-
+    return label_sf, label_pt
 
 def PCA(data):
     H = np.dot(data.T,data)
@@ -116,19 +140,10 @@ def PCA(data):
     eigenvectors = eigenvectors[:, sort]
     return eigenvalues, eigenvectors
 
-def gen_pca_mask(cluster_ids, sf, theta_threshold = 60, dis_threshold = 0.5):
-    mask_pca = np.ones(sf.shape[0])
-    for label_id in cluster_ids:
-        if(len(cluster_ids[label_id]) < 50): continue
-        w, v = PCA(sf[np.array(cluster_ids[label_id])])
-        v1 = v[:, 0]
-
-        # mos pca
-        for i in cluster_ids[label_id]:
-            cur_dis = np.linalg.norm(sf[i])
-            cos_theta = np.dot(v1, sf[i]) / (np.linalg.norm(v1) * cur_dis)
-            mask_pca[i] = (np.abs(cos_theta) < theta_threshold / 180 * np.pi) & (cur_dis > dis_threshold)
-    return mask_pca
+def gen_hist(distance_list, title = ''):
+    plt.hist(distance_list, bins=100)
+    plt.title(title)
+    plt.show()
 
 
 def gen_var_mask(label_sf, var_threshold):
@@ -151,69 +166,63 @@ def gen_dis_mask(label_sf, dis_threshold):
     print(mean_norm)
     return label_sf_dis > dis_threshold * mean_norm
 
-def open_label(filename):
-    label = np.fromfile(filename, dtype=np.uint32)
-    label = label.reshape((-1))
+def vis_flow(pc1, pc2, sf, seg1, seg2):
+    pc1 = pc1[seg1 < 8]
+    pc2 = pc2[seg2 < 8]
+    sf = sf[seg1 < 8]
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
+    pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc1))
+    pcd1.paint_uniform_color([1,0,0])
+    vis.add_geometry(pcd1)
+    pcd2 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc2))
+    pcd2.paint_uniform_color([0,0,1])
+    vis.add_geometry(pcd2)
+    # pcdm = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc1 + sf))
+    # pcdm.paint_uniform_color([0,1,0])
+    # vis.add_geometry(pcdm)
 
-    sem_label = label & 0xFFFF
-    label = [1 if i > 250 else 0 for i in sem_label ]
-    return label
+    dis = np.linalg.norm(sf, axis=1)
+    max_dis = np.max(dis)
 
-def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
+    pt, st, colors = [], [], []
+    for i in range(len(pc1)):
+        pt.append(pc1[i])
+        pt.append(pc1[i] + sf[i])
+        st.append([2 * i, 2 * i + 1])
+        colors.append(get_color(dis[i] / max_dis))
+    line_set = o3d.geometry.LineSet()
+    line_set.points = o3d.utility.Vector3dVector(np.asarray(pt))
+    line_set.lines = o3d.utility.Vector2iVector(np.asarray(st))
+    line_set.colors = o3d.utility.Vector3dVector(np.asarray(colors))
+    vis.add_geometry(line_set)
+    vis.run()
+    vis.destroy_window()
+
+def run(cfg_file = 'cfg/vis_sf_kitti_trans.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
+    p1_id = cfg['p1_id']
+    p2_id = cfg['p2_id']
+    pc_path = cfg['pc_path']
+
     poses = load_poses(cfg['poses_path'])
     calib = load_calib(cfg['calib_path'])
-    pc_path = cfg['pc_path']
-    seq_acc = []
-    tot_tp, tot_fp, tot_fn = 0, 0, 0
-    for p1_id in range(9, 4071, 10):
-        seg1 = np.load(cfg['seg_label'] + f'{p1_id:06d}.npy')
+    # pc1 = (poses[p1_id] @ calib @ pc1.T).T
+    pc1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
+    pc2 = load_vertex(pc_path + f'{p2_id:06d}.bin')
+    pc2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[p2_id] @ calib @ pc2.T).T
+    pc1 = pc1[:, :3]
+    pc2 = pc2[:, :3]
+    seg1 = np.load(cfg['seg_label'] + f'{p1_id:06d}.npy')
+    seg2 = np.load(cfg['seg_label'] + f'{p2_id:06d}.npy')
+    # pc1, _ = pre_process(pc1, seg1)
+    # pc2, _ = pre_process(pc2, seg2)
+    sf = flow_infer(pc1, pc2, cfg['checkpoint'], seg1, seg2)
+    vis_flow(pc1, pc2, sf, seg1, seg2)
 
-        p2_id = [p1_id - cfg['skip_n']]
-        pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
 
-        cluster_ids = cluster(pchom1[:, :3], seg1)
-        mask = np.zeros(len(pchom1))
-        for idx in p2_id:
-            pchom2 = load_vertex(pc_path + f'{idx:06d}.bin')
-            seg2 = np.load(cfg['seg_label'] + f'{idx:06d}.npy')
-            pchom2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
-            sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], seg1, seg2)
-
-            mask_pca = gen_pca_mask(cluster_ids, sf, cfg['theta_threshold'],cfg['dis_threshold'])
-
-            for i in range(len(mask_pca)):
-                if(mask_pca[i] == 1):
-                    mask[i] += 1
-
-        tot = len(p2_id)
-
-        is_mos = np.zeros(len(pchom1))
-        for i in cluster_ids:
-            if len(cluster_ids[i]) >= cfg['num_threshold'] and np.sum(mask[cluster_ids[i]]) / (tot * len(cluster_ids[i])) > cfg['check_ratio']:
-                is_mos[cluster_ids[i]] = 1
-
-        gt_label = open_label(cfg['label_path'] + f'{p1_id:06d}.label' )
-        tp, fp, fn = 0, 0, 0
-        for i in range(len(is_mos)):
-            if(is_mos[i] == 1 and gt_label[i] == 1):
-                tp+=1
-            elif (is_mos[i] == 1 and gt_label[i] == 0):
-                fp+=1
-            elif (is_mos[i] == 0 and gt_label[i] == 1):
-                fn+=1
-        tot_tp += tp
-        tot_fn += fn
-        tot_fp += fp
-        if tp + fp + fn == 0: continue
-        seq_acc.append(tp / (tp + fp + fn))
-
-        print(p1_id, sum(seq_acc) / len(seq_acc), tot_tp/(tot_tp+tot_fn+tot_fp))
-        np.save(cfg['save_label'] + f'{p1_id:06d}', is_mos)
-
-    print(sum(seq_acc) / len(seq_acc))
 
 if __name__ == '__main__':
     run()

@@ -1,7 +1,7 @@
 p1_id: 598
-p2_id: 590
+p2_id: 596
 
-checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_checkpoints/flowstep3d_self/2021-03-24_01-03/last.ckpt"
+checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-04-07_00-56/last.ckpt"
 
 pc_path: "/media/dl/data_pc/semanticKITTI/sequences/08/velodyne/"
 poses_path: "/media/dl/data_pc/semanticKITTI/sequences/08/poses.txt"

@@ -46,7 +46,7 @@ def open_label(filename):
     return label
 
 seq = "08"
-frame_id = [598]
+frame_id = [50]
 for f_id in frame_id:
     str_fid = "%06d"%(f_id)
     print(str_fid)
