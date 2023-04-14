@@ -176,95 +176,91 @@ def gen_dis_mask(label_sf, dis_threshold):
     print(mean_norm)
     return label_sf_dis > dis_threshold * mean_norm
 
+def open_label(filename):
+    label = np.fromfile(filename, dtype=np.uint32)
+    label = label.reshape((-1))
+
+    sem_label = label & 0xFFFF
+    label = [1 if i > 250 else 0 for i in sem_label ]
+    return label
+
 def run(cfg_file = 'cfg/flowsegv2.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
-    p1_id = cfg['p1_id']
-    p2_id = cfg['p2_id']
-    pc_path = cfg['pc_path']
-
     poses = load_poses(cfg['poses_path'])
     calib = load_calib(cfg['calib_path'])
-    # pc1 = (poses[p1_id] @ calib @ pc1.T).T
-    pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
-    pcd1 = o3d.geometry.PointCloud()
-    pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
-    pcd1.estimate_normals()
-    pc1_normals = np.array(pcd1.normals)
-    pc1, ori_idx = pre_process(pchom1[:, :3], pc1_normals)
-    pcd1.points = o3d.utility.Vector3dVector(pc1)
-    labels = cluster(pcd1)
-    label_pt, label_pt_id = gather_label(labels, pc1)
-    mask = np.zeros(len(pc1))
-    for idx in p2_id:
-        pchom2 = load_vertex(pc_path + f'{idx:06d}.bin')
-        pcd2 = o3d.geometry.PointCloud()
-        pcd2.points = o3d.utility.Vector3dVector(pchom2[:, :3])
-        pcd2.estimate_normals()
-        pc2_normals = np.array(pcd2.normals)
-        pc2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
-        pc2, _ = pre_process(pc2[:, :3], pc2_normals)
-        sf = flow_infer(pc1, pc2)
-        # gen_hist(np.linalg.norm(sf, axis=1))
-        label_sf = gather_sf(sf, labels)
+    pc_path = cfg['pc_path']
+    seq_acc = []
+    tot_tp, tot_fp, tot_fn = 0, 0, 0
+    for p1_id in range(5, 4071):
+        p2_id = [p1_id - 2]
+        gt_label = open_label(cfg['label_path'] + f'{p1_id:06d}.label' )
+        # pc1 = (poses[p1_id] @ calib @ pc1.T).T
+        pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
+        pcd1 = o3d.geometry.PointCloud()
+        pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
+        pcd1.estimate_normals()
+        pc1_normals = np.array(pcd1.normals)
+        pc1, ori_idx = pre_process(pchom1[:, :3], pc1_normals)
+        pcd1.points = o3d.utility.Vector3dVector(pc1)
+        labels = cluster(pcd1)
+        label_pt, label_pt_id = gather_label(labels, pc1)
+        mask = np.zeros(len(pc1))
+        for idx in p2_id:
+            pchom2 = load_vertex(pc_path + f'{idx:06d}.bin')
+            pcd2 = o3d.geometry.PointCloud()
+            pcd2.points = o3d.utility.Vector3dVector(pchom2[:, :3])
+            pcd2.estimate_normals()
+            pc2_normals = np.array(pcd2.normals)
+            pc2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
+            pc2, _ = pre_process(pc2[:, :3], pc2_normals)
+            sf = flow_infer(pc1, pc2)
+            # gen_hist(np.linalg.norm(sf, axis=1))
+            label_sf = gather_sf(sf, labels)
 
-        mask_pca = gen_pca_mask(label_sf, label_pt_id, sf, cfg['theta_threshold'],cfg['dis_threshold'])
+            mask_pca = gen_pca_mask(label_sf, label_pt_id, sf, cfg['theta_threshold'],cfg['dis_threshold'])
 
-        for i in range(len(labels)):
-            if(labels[i] >=0 and mask_pca[i] == 1):
-                mask[i] += 1
+            for i in range(len(labels)):
+                if(labels[i] >=0 and mask_pca[i] == 1):
+                    mask[i] += 1
 
-    tot = len(p2_id)
+        tot = len(p2_id)
 
-    is_mos_cur = np.zeros(len(pc1))
-    for i in label_pt_id:
-        if i < 0: continue
-        if len(label_pt_id[i]) >= cfg['num_threshold'] and np.sum(mask[label_pt_id[i]]) / (tot * len(label_pt_id[i])) > 0.9:
-            is_mos_cur[label_pt_id[i]] = 1
+        is_mos_cur = np.zeros(len(pc1))
+        for i in label_pt_id:
+            if i < 0: continue
+            if len(label_pt_id[i]) >= cfg['num_threshold'] and np.sum(mask[label_pt_id[i]]) / (tot * len(label_pt_id[i])) > 0.9:
+                is_mos_cur[label_pt_id[i]] = 1
 
-    pcd1 = o3d.geometry.PointCloud()
-    pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
-    cloud_tree = o3d.geometry.KDTreeFlann(pcd1)
-    is_mos_ori = np.zeros(len(pchom1))
-    colors = np.array([[0.25, 0.25, 0.25] for i in range(len(pchom1))])
-    for i in range(len(ori_idx)):
-        if(is_mos_cur[i] == 1):
-            is_mos_ori[ori_idx[i]] = 1
-            colors[ori_idx[i]] = [1, 0, 0]
-            [_, idx, _] = cloud_tree.search_radius_vector_3d(pcd1.points[ori_idx[i]], 0.3)
-            is_mos_ori[idx] = 1
-            colors[idx] = [1, 0, 0]
+        pcd1 = o3d.geometry.PointCloud()
+        pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
+        cloud_tree = o3d.geometry.KDTreeFlann(pcd1)
+        is_mos_ori = np.zeros(len(pchom1))
+        for i in range(len(ori_idx)):
+            if(is_mos_cur[i] == 1):
+                is_mos_ori[ori_idx[i]] = 1
+                [_, idxs, _] = cloud_tree.search_radius_vector_3d(pcd1.points[ori_idx[i]], 0.3)
+                is_mos_ori[idxs] = 1
 
+        tp, fp, fn = 0, 0, 0
+        for i in range(len(is_mos_ori)):
+            if(is_mos_ori[i] == 1 and gt_label[i] == 1):
+                tp+=1
+            elif (is_mos_ori[i] == 1 and gt_label[i] == 0):
+                fp+=1
+            elif (is_mos_ori[i] == 0 and gt_label[i] == 1):
+                fn+=1
+        tot_tp += tp
+        tot_fn += fn
+        tot_fp += fp
+        if tp + fp + fn == 0: continue
+        seq_acc.append(tp / (tp + fp + fn))
 
+        print(p1_id, sum(seq_acc) / len(seq_acc), tot_tp/(tot_tp+tot_fn+tot_fp))
+        np.save(cfg['save_label'] + f'{p1_id:06d}', is_mos_ori)
 
-    pcd1.colors = o3d.utility.Vector3dVector(np.array(colors))
-    vis = o3d.visualization.Visualizer()
-    vis.create_window()
-    vis.add_geometry(pcd1)
-    # width, height, focal = 800, 600, 0.96
-    # K = [[focal * width, 0, width / 2 - 0.5],
-    #     [0, focal * width, height / 2 -0.5],
-    #     [0, 0, 1]]
-    # camera = o3d.camera.PinholeCameraParameters()
-    # camera.intrinsic = o3d.camera.PinholeCameraIntrinsic(width=width, height=height, fx=K[0][0], fy=K[1][1], cx=K[0][2], cy=K[1][2])
-    # camera.extrinsic = np.array( [[-9.40456774e-01,  3.32088603e-01,  7.25135505e-02, -8.86299589e-01],
-    #                               [-5.55180191e-03,  1.98294206e-01, -9.80126821e-01,  1.43469784e+01],
-    #                               [-3.39867964e-01, -9.22169490e-01, -1.84643440e-01,  3.88750768e+01],
-    #                               [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00],], dtype=np.float64)
-
-    # ctr = vis.get_view_control()
-    # ctr.convert_from_pinhole_camera_parameters(camera)
-
-    vis.run()
-    # params = vis.get_view_control().convert_to_pinhole_camera_parameters()
-    # print("View Matrix:\n", params.extrinsic)
-    # print("Projection Matrix:\n", params.intrinsic)
-    # float_buffer = np.array(vis.capture_screen_float_buffer(True))
-
-    vis.destroy_window()
-    # image = Image.fromarray((float_buffer * 255).astype('uint8'))
-    # image.save('image.png')
+    print(sum(seq_acc) / len(seq_acc))
 
 if __name__ == '__main__':
     run()

@@ -1,16 +1,18 @@
-p1_id: 98
+p1_id: 598
 p2_id:
-  # - 97
-  - 96
+  - 590
 
-checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-04-07_00-56/last.ckpt"
+checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_checkpoints/flowstep3d_self/2021-03-24_01-03/last.ckpt"
 
 pc_path: "/media/dl/data_pc/semanticKITTI/sequences/08/velodyne/"
 poses_path: "/media/dl/data_pc/semanticKITTI/sequences/08/poses.txt"
 calib_path: "/media/dl/data_pc/semanticKITTI/sequences/08/calib.txt"
 label_path: "/media/dl/data_pc/semanticKITTI/sequences/08/labels/"
 save_label: "/media/dl/data_pc/data_demo/flowstepv2/labels/08/"
+seg_label: "/media/dl/data_pc/data_demo/sphereformer_label/08/"
 
-dis_threshold: 0.2
+dis_threshold: 0.5
 theta_threshold: 60
-num_threshold: 100
+num_threshold: 50
+skip_n: 2
+check_ratio: 0.2

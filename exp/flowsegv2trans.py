@@ -38,75 +38,42 @@ def load_vertex(scan_path):
     current_vertex[:,3] = np.ones(current_vertex.shape[0])
     return current_vertex
 
-def pre_process(pc, pc_normals):
-    is_not_ground = (pc[:, 2] > -1.5)
-    horizontal_normals = (np.abs(pc_normals[:, -1]) > .85) & (pc[:, 2] < -1.0)
-    is_near = (np.amax(np.abs(pc), axis=1) < 35)
-    mask = is_not_ground & (~horizontal_normals) & is_near
-    ori_idx = np.arange(len(pc))[mask]
 
-    pc = pc[ori_idx]
-
-    return pc, ori_idx
-
-def are_same_plane(plane1, plane2, tolerance):
-    a1, b1, c1, d1 = plane1
-    a2, b2, c2, d2 = plane2
-    
-    dot_product = a1*a2 + b1*b2 + c1*c2
-    if abs(dot_product) < 1 - 0.1:
-        return False
-    
-    dist = abs(d1 - d2) / math.sqrt(a1**2 + b1**2 + c1**2)
-    
-    if dist <= tolerance:
-        return True
-    else:
-        return False
-    
-def cluster(pcd):
-    labels = np.asarray(pcd.cluster_dbscan(eps=0.55, min_points=10))
-    max_label = max(labels)
-    print(max_label)
-    planes_idx = []
-    planes_arg = []
-    for i in range(max_label + 1):
-        # 获取当前平面的索引
-        indices = np.where(labels == i)[0]
-
-        if(len(indices) < 10): continue
-
-        # 根据索引获取当前平面的点云
-        cloud = pcd.select_by_index(indices)
-
-        # 拟合平面
-        [a, b, c, d], idx = cloud.segment_plane(0.1, 3, 10)
-        planes_idx.append(indices[idx])
-        planes_arg.append([a,b,c,d])
-
-    for i in range(len(planes_arg)):
-        for j in range(i + 1, len(planes_arg)):
-            if labels[planes_idx[j][0]] == labels[planes_idx[i][0]]: continue
-            if(are_same_plane(planes_arg[i], planes_arg[j], 0.2)):
-                labels[planes_idx[j]] = labels[planes_idx[i][0]]
-    return labels
-
-def flow_infer(pc1_in, pc2_in):
-    pc1 = torch.tensor(pc1_in[:,:3]).to(torch.float).unsqueeze(0).to(device)
-    pc2 = torch.tensor(pc2_in[:,:3]).to(torch.float).unsqueeze(0).to(device)
-
-    checkpoint = torch.load('/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-04-05_20-02/epoch=9.ckpt')
+def flow_infer(pc1_in, pc2_in,ckpt_path, seg1, seg2):
+    checkpoint = torch.load(ckpt_path)
     model = FlowStep3D(**checkpoint["hyper_parameters"])
     model_weights = checkpoint["state_dict"]
     for key in list(model_weights):
         model_weights[key.replace("model.", "")] = model_weights.pop(key)
     model.load_state_dict(model_weights)
-
     model.eval().to(device)
-    with torch.no_grad():
-        sf = model(pc1,pc2,pc1,pc2,10)
+    res_sf = np.zeros((len(pc1_in), 3))
+    for i in range(8):
+        cur_idx_1 = np.arange(len(seg1))[seg1 == i]
+        cur_pc1 = pc1_in[cur_idx_1]
+        cur_pc2 = pc2_in[seg2 == i]
 
-    return sf[-1].cpu().detach().numpy().reshape(-1, 3)
+        if (len(cur_pc1) < 100): continue
+        pcd1 = o3d.geometry.PointCloud()
+        pcd1.points = o3d.utility.Vector3dVector(cur_pc1)
+        labels1 = np.asarray(pcd1.cluster_dbscan(eps=0.55, min_points=20))
+        cur_pc1 = cur_pc1[labels1 >= 0]
+        if (len(cur_pc1) < 100): continue
+
+        if(len(cur_pc2) < 100): continue
+        pcd2 = o3d.geometry.PointCloud()
+        pcd2.points = o3d.utility.Vector3dVector(cur_pc2)
+        labels2 = np.asarray(pcd2.cluster_dbscan(eps=0.55, min_points=20))
+        cur_pc2 = cur_pc2[labels2 >= 0]
+        if(len(cur_pc2) < 100): continue
+
+        print(len(cur_pc1))
+        pc1 = torch.tensor(cur_pc1).to(torch.float).unsqueeze(0).to(device)
+        pc2 = torch.tensor(cur_pc2).to(torch.float).unsqueeze(0).to(device)
+        with torch.no_grad():
+            cur_sf = model(pc1,pc2,pc1,pc2,5)
+        res_sf[cur_idx_1[labels1 >= 0]] = cur_sf[-1].cpu().detach().numpy()
+    return res_sf
 
 def gather_sf(sf, labels):
     label_sf = {}
@@ -128,6 +95,23 @@ def gather_label(labels, pc1):
             label_pt_id[labels[i]]. append(i)
     return label_pt, label_pt_id
 
+
+def cluster(pc, seg):
+    ori_idx = np.arange(len(pc))[seg < 8]
+    pc = pc[ori_idx]
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(pc)
+    labels = np.asarray(pcd.cluster_dbscan(eps=0.55, min_points=10))
+    labels_ids = {}
+    for i in range(len(labels)):
+        if labels[i] < 0: continue
+        if labels[i] not in labels_ids:
+            labels_ids[labels[i]] = [i]
+        else:
+            labels_ids[labels[i]].append(ori_idx[i])
+    return labels_ids
+
+
 def PCA(data):
     H = np.dot(data.T,data)
     eigenvectors,eigenvalues,eigenvectors_T = np.linalg.svd(H)
@@ -136,20 +120,15 @@ def PCA(data):
     eigenvectors = eigenvectors[:, sort]
     return eigenvalues, eigenvectors
 
-def gen_hist(distance_list, title = ''):
-    plt.hist(distance_list, bins=100)
-    plt.title(title)
-    plt.show()
-
-def gen_pca_mask(label_sf, label_pt_id, sf, theta_threshold = 60, dis_threshold = 0.5):
+def gen_pca_mask(cluster_ids, sf, theta_threshold = 60, dis_threshold = 0.5):
     mask_pca = np.ones(sf.shape[0])
-    for label_id in label_sf:
-        if label_id < 0: continue
-        w, v = PCA(np.array(label_sf[label_id]))
+    for label_id in cluster_ids:
+        if(len(cluster_ids[label_id]) < 50): continue
+        w, v = PCA(sf[np.array(cluster_ids[label_id])])
         v1 = v[:, 0]
 
         # mos pca
-        for i in label_pt_id[label_id]:
+        for i in cluster_ids[label_id]:
             cur_dis = np.linalg.norm(sf[i])
             cos_theta = np.dot(v1, sf[i]) / (np.linalg.norm(v1) * cur_dis)
             mask_pca[i] = (np.abs(cos_theta) < theta_threshold / 180 * np.pi) & (cur_dis > dis_threshold)
@@ -176,68 +155,47 @@ def gen_dis_mask(label_sf, dis_threshold):
     print(mean_norm)
     return label_sf_dis > dis_threshold * mean_norm
 
-def run(cfg_file = 'cfg/flowsegv2.yaml'):
+def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
     p1_id = cfg['p1_id']
     p2_id = cfg['p2_id']
     pc_path = cfg['pc_path']
-
+    seg1 = np.load(cfg['seg_label'] + f'{p1_id:06d}.npy')
     poses = load_poses(cfg['poses_path'])
     calib = load_calib(cfg['calib_path'])
-    # pc1 = (poses[p1_id] @ calib @ pc1.T).T
     pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
-    pcd1 = o3d.geometry.PointCloud()
-    pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
-    pcd1.estimate_normals()
-    pc1_normals = np.array(pcd1.normals)
-    pc1, ori_idx = pre_process(pchom1[:, :3], pc1_normals)
-    pcd1.points = o3d.utility.Vector3dVector(pc1)
-    labels = cluster(pcd1)
-    label_pt, label_pt_id = gather_label(labels, pc1)
-    mask = np.zeros(len(pc1))
+
+    cluster_ids = cluster(pchom1[:, :3], seg1)
+    mask = np.zeros(len(pchom1))
     for idx in p2_id:
         pchom2 = load_vertex(pc_path + f'{idx:06d}.bin')
-        pcd2 = o3d.geometry.PointCloud()
-        pcd2.points = o3d.utility.Vector3dVector(pchom2[:, :3])
-        pcd2.estimate_normals()
-        pc2_normals = np.array(pcd2.normals)
-        pc2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
-        pc2, _ = pre_process(pc2[:, :3], pc2_normals)
-        sf = flow_infer(pc1, pc2)
-        # gen_hist(np.linalg.norm(sf, axis=1))
-        label_sf = gather_sf(sf, labels)
+        seg2 = np.load(cfg['seg_label'] + f'{idx:06d}.npy')
+        pchom2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
+        sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], seg1, seg2)
 
-        mask_pca = gen_pca_mask(label_sf, label_pt_id, sf, cfg['theta_threshold'],cfg['dis_threshold'])
+        mask_pca = gen_pca_mask(cluster_ids, sf, cfg['theta_threshold'],cfg['dis_threshold'])
 
-        for i in range(len(labels)):
-            if(labels[i] >=0 and mask_pca[i] == 1):
+        for i in range(len(mask_pca)):
+            if(mask_pca[i] == 1):
                 mask[i] += 1
 
     tot = len(p2_id)
 
-    is_mos_cur = np.zeros(len(pc1))
-    for i in label_pt_id:
-        if i < 0: continue
-        if len(label_pt_id[i]) >= cfg['num_threshold'] and np.sum(mask[label_pt_id[i]]) / (tot * len(label_pt_id[i])) > 0.9:
-            is_mos_cur[label_pt_id[i]] = 1
+    is_mos = np.zeros(len(pchom1))
+    for i in cluster_ids:
+        if len(cluster_ids[i]) >= cfg['num_threshold'] and np.sum(mask[cluster_ids[i]]) / (tot * len(cluster_ids[i])) > 0.2:
+            is_mos[cluster_ids[i]] = 1
+
+
+    colors = np.array([[0.25, 0.25, 0.25] for i in range(len(pchom1))])
+    for i in range(len(is_mos)):
+        if(is_mos[i] == 1):
+            colors[i] = [1, 0, 0]
 
     pcd1 = o3d.geometry.PointCloud()
     pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
-    cloud_tree = o3d.geometry.KDTreeFlann(pcd1)
-    is_mos_ori = np.zeros(len(pchom1))
-    colors = np.array([[0.25, 0.25, 0.25] for i in range(len(pchom1))])
-    for i in range(len(ori_idx)):
-        if(is_mos_cur[i] == 1):
-            is_mos_ori[ori_idx[i]] = 1
-            colors[ori_idx[i]] = [1, 0, 0]
-            [_, idx, _] = cloud_tree.search_radius_vector_3d(pcd1.points[ori_idx[i]], 0.3)
-            is_mos_ori[idx] = 1
-            colors[idx] = [1, 0, 0]
-
-
-
     pcd1.colors = o3d.utility.Vector3dVector(np.array(colors))
     vis = o3d.visualization.Visualizer()
     vis.create_window()
