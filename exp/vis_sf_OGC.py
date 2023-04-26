@@ -199,12 +199,12 @@ def vis_flow(pc1, pc2, sf, seg1, seg2):
     vis.run()
     vis.destroy_window()
 
-def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
+def run(cfg_file = 'cfg/vis_sf_OGC.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
     p1_id = cfg['p1_id']
-    p2_id = cfg['p2_id'][0]
+    p2_id = cfg['p2_id']
     pc_path = cfg['pc_path']
 
     poses = load_poses(cfg['poses_path'])

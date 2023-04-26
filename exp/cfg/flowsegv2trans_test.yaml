@@ -1,6 +1,6 @@
-p1_id: 1009
+p1_id: 50
 p2_id:
-  - 1007
+  - 48
 
 checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-04-07_00-56/last.ckpt"
 
@@ -11,9 +11,8 @@ label_path: "/media/dl/data_pc/semanticKITTI/sequences/08/labels/"
 save_label: "/media/dl/data_pc/data_demo/flowstepv2/labels/08/"
 seg_label: "/media/dl/data_pc/data_demo/sphereformer_label/08/"
 
-dis_threshold: [0.2, 1.0]
-num_threshold: [20, 50]
-iou_threshold: [0.3, 0.5]
+dis_threshold: 2.0
 theta_threshold: 60
+num_threshold: 50
 skip_n: 2
-check_ratio: 0.8
+check_ratio: 0.9

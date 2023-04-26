@@ -5,11 +5,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import open3d as o3d
 import numpy as np
 import torch
-import math
 from models.flowstep3d import FlowStep3D
 import yaml
-from PIL import Image
-import matplotlib.pyplot as plt
+from shapely.geometry import MultiPoint
+
 
 device = torch.device('cuda')
 
@@ -80,17 +79,6 @@ def gather_sf(sf, labels):
             label_sf[labels[i]].append(sf[i])
     return label_sf
 
-def gather_label(labels, pc1):
-    label_pt, label_pt_id = {}, {}
-    for i in range(len(labels)):
-        if labels[i] not in label_pt:
-            label_pt[labels[i]] = [pc1[i]]
-            label_pt_id[labels[i]] = [i]
-        else:
-            label_pt[labels[i]].append(pc1[i])
-            label_pt_id[labels[i]]. append(i)
-    return label_pt, label_pt_id
-
 
 def cluster(pc, seg):
     ori_idx = np.arange(len(pc))[seg < 8]
@@ -98,14 +86,15 @@ def cluster(pc, seg):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pc)
     labels = np.asarray(pcd.cluster_dbscan(eps=0.55, min_points=10))
-    labels_ids = {}
+    labels_ids, ins = {}, {}
     for i in range(len(labels)):
         if labels[i] < 0: continue
+        ins[ori_idx[i]] = labels[i]
         if labels[i] not in labels_ids:
-            labels_ids[labels[i]] = [i]
+            labels_ids[labels[i]] = [ori_idx[i]]
         else:
             labels_ids[labels[i]].append(ori_idx[i])
-    return labels_ids
+    return ins, labels_ids
 
 
 def PCA(data):
@@ -116,20 +105,20 @@ def PCA(data):
     eigenvectors = eigenvectors[:, sort]
     return eigenvalues, eigenvectors
 
-def gen_pca_mask(cluster_ids, sf, theta_threshold = 60, dis_threshold = 0.5):
-    mask_pca = np.ones(sf.shape[0])
+def gen_pca_mask(seg, cluster_ids, sf, theta_threshold = 60, dis_threshold_list = [1.0]):
+    mask_pca = np.zeros(sf.shape[0])
     for label_id in cluster_ids:
-        if(len(cluster_ids[label_id]) < 50): continue
+        if(len(cluster_ids[label_id]) < 20): continue
         w, v = PCA(sf[np.array(cluster_ids[label_id])])
         v1 = v[:, 0]
 
-        # mos pca
         for i in cluster_ids[label_id]:
+            dis_threshold = dis_threshold_list[seg[i] in [0, 3, 4]]
             cur_dis = np.linalg.norm(sf[i])
             cos_theta = np.dot(v1, sf[i]) / (np.linalg.norm(v1) * cur_dis)
             mask_pca[i] = (np.abs(cos_theta) < theta_threshold / 180 * np.pi) & (cur_dis > dis_threshold)
+        # print(np.sum(mask_pca[cluster_ids[label_id]]) / len(cluster_ids[label_id]))
     return mask_pca
-
 
 def gen_var_mask(label_sf, var_threshold):
     label_sf_var = np.zeros(max(label_sf.keys()) + 1)
@@ -151,6 +140,25 @@ def gen_dis_mask(label_sf, dis_threshold):
     print(mean_norm)
     return label_sf_dis > dis_threshold * mean_norm
 
+def iou(box1, box2):
+    box1 = MultiPoint(box1[:, :2]).convex_hull
+    box2 = MultiPoint(box2[:, :2]).convex_hull
+    inter = box1.intersection(box2).area
+    union = box1.area + box2.area - inter
+    iou = inter / union
+
+    return iou
+
+def gen_box(labels, pc):
+    box = {}
+    for i in labels:
+        if len(labels[i]) > 20:
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(np.asarray(pc[labels[i]]))
+            bbox = pcd.get_oriented_bounding_box()
+            box[i] = np.asarray(bbox.get_box_points())
+    return box
+
 def open_label(filename):
     label = np.fromfile(filename, dtype=np.uint32)
     label = label.reshape((-1))
@@ -158,6 +166,14 @@ def open_label(filename):
     sem_label = label & 0xFFFF
     label = [1 if i > 250 else 0 for i in sem_label ]
     return label
+
+def open_mos(filename, size):
+    mos_id = np.load(filename)
+    label = np.zeros(size)
+    for it in mos_id:
+        label[it] = 1
+    return label
+
 
 def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
     print('running...')
@@ -173,29 +189,42 @@ def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
 
         p2_id = [p1_id - cfg['skip_n']]
         pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
+        labels1, cluster_ids1 = cluster(pchom1[:, :3], seg1)
+        box1 = gen_box(cluster_ids1, pchom1[:, :3])
 
-        cluster_ids = cluster(pchom1[:, :3], seg1)
         mask = np.zeros(len(pchom1))
         for idx in p2_id:
             pchom2 = load_vertex(pc_path + f'{idx:06d}.bin')
             seg2 = np.load(cfg['seg_label'] + f'{idx:06d}.npy')
             pchom2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
+            _, cluster_ids2 = cluster(pchom2[:, :3], seg2)
+            box2 = gen_box(cluster_ids2, pchom2[:, :3])
+            mask_iou = {}
+            for i in box1:
+                mask_iou[i] = 1
+                for j in box2:
+                    if iou(box1[i], box2[j]) > cfg['iou_threshold'][seg1[cluster_ids1[i][0]] in [0, 3, 4]]:
+                        mask_iou[i] = 0
+
             sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], seg1, seg2)
-
-            mask_pca = gen_pca_mask(cluster_ids, sf, cfg['theta_threshold'],cfg['dis_threshold'])
-
+            
+            mask_pca = gen_pca_mask(seg1, cluster_ids1, sf, cfg['theta_threshold'],cfg['dis_threshold'])
             for i in range(len(mask_pca)):
-                if(mask_pca[i] == 1):
+                if(mask_pca[i] == 1 and 
+                (i in labels1) and 
+                (labels1[i] in mask_iou) and 
+                mask_iou[labels1[i]] == 1):
                     mask[i] += 1
 
         tot = len(p2_id)
 
         is_mos = np.zeros(len(pchom1))
-        for i in cluster_ids:
-            if len(cluster_ids[i]) >= cfg['num_threshold'] and np.sum(mask[cluster_ids[i]]) / (tot * len(cluster_ids[i])) > cfg['check_ratio']:
-                is_mos[cluster_ids[i]] = 1
+        for i in cluster_ids1:
+            if (len(cluster_ids1[i]) >= cfg['num_threshold'][seg1[cluster_ids1[i][0]] in [0, 3, 4]] and 
+                np.sum(mask[cluster_ids1[i]]) / (tot * len(cluster_ids1[i])) > cfg['check_ratio']):
+                is_mos[cluster_ids1[i]] = 1
 
-        gt_label = open_label(cfg['label_path'] + f'{p1_id:06d}.label' )
+        gt_label = open_mos(f'/media/dl/data_pc/data_demo/mos_label/08/{p1_id:06d}.npy', len(pchom1))
         tp, fp, fn = 0, 0, 0
         for i in range(len(is_mos)):
             if(is_mos[i] == 1 and gt_label[i] == 1):

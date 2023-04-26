@@ -19,7 +19,8 @@ def are_same_plane(plane1, plane2, tolerance):
 
 np.random.seed(57)
 # 读取点云
-data_path = '/media/dl/data_pc/semanticKITTI/sequences/08/velodyne/000010.bin'
+fid = 159
+data_path = f'/media/dl/data_pc/semanticKITTI/sequences/08/velodyne/{fid:06d}.bin'
 def load_vertex(scan_path):
     current_vertex = np.fromfile(scan_path, dtype=np.float32).reshape((-1, 4))
     current_vertex[:,3] = np.ones(current_vertex.shape[0])
@@ -32,7 +33,7 @@ def pre_process(pc, seg):
 pc = load_vertex(data_path)[:,:3]
 pcd = o3d.geometry.PointCloud()
 pcd.points = o3d.utility.Vector3dVector(pc)
-pc, _ = pre_process(pc, np.load('/media/dl/data_pc/data_demo/sphereformer_label/000010.npy'))
+pc, _ = pre_process(pc, np.load(f'/media/dl/data_pc/data_demo/sphereformer_label/08/{fid:06d}.npy'))
 pcd.points = o3d.utility.Vector3dVector(pc)
 
 labels = np.asarray(pcd.cluster_dbscan(eps=0.75, min_points=10))
