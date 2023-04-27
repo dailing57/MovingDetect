@@ -1,6 +1,6 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import open3d as o3d
 import numpy as np
@@ -40,18 +40,10 @@ def load_vertex(scan_path):
     current_vertex[:,3] = np.ones(current_vertex.shape[0])
     return current_vertex
 
-def pre_process(pc, pc_normals):
-    is_not_ground = (pc[:, 2] > -1.4)
-    pc = pc[is_not_ground]
-    pc_normals = pc_normals[is_not_ground]
-
-    horizontal_normals = np.abs(pc_normals[:, -1]) < .85
-    pc = pc[horizontal_normals]
-
-    is_near = (np.amax(np.abs(pc), axis=1) < 35)
-    pc = pc[is_near]
-
-    return pc
+def pre_process(pc, seg):
+    ori_idx = np.arange(len(pc))[seg < 8]
+    pc = pc[ori_idx]
+    return pc, ori_idx
 
 def are_same_plane(plane1, plane2, tolerance):
     a1, b1, c1, d1 = plane1
@@ -95,22 +87,38 @@ def cluster(pcd):
                 labels[planes_idx[j]] = labels[planes_idx[i][0]]
     return labels
 
-def flow_infer(pc1_in, pc2_in, checkpoint_path):
-    pc1 = torch.tensor(pc1_in[:,:3]).to(torch.float).unsqueeze(0).to(device)
-    pc2 = torch.tensor(pc2_in[:,:3]).to(torch.float).unsqueeze(0).to(device)
-
-    checkpoint = torch.load(checkpoint_path)
+def flow_infer(pc1_in, pc2_in,ckpt_path, seg1, seg2):
+    checkpoint = torch.load(ckpt_path)
     model = FlowStep3D(**checkpoint["hyper_parameters"])
     model_weights = checkpoint["state_dict"]
     for key in list(model_weights):
         model_weights[key.replace("model.", "")] = model_weights.pop(key)
     model.load_state_dict(model_weights)
-
     model.eval().to(device)
-    with torch.no_grad():
-        sf = model(pc1,pc2,pc1,pc2,10)
+    res_sf = np.zeros((len(pc1_in), 3))
+    cur_idx_1 = np.arange(len(seg1))[(seg1 != 8) & (seg1 != 10)]
+    cur_pc1 = pc1_in[cur_idx_1]
+    cur_pc2 = pc2_in[(seg2 != 8) & (seg2 != 10)]
 
-    return sf[-1].cpu().detach().numpy().reshape(-1, 3)
+    pcd1 = o3d.geometry.PointCloud()
+    pcd1.points = o3d.utility.Vector3dVector(cur_pc1)
+    labels1 = np.asarray(pcd1.cluster_dbscan(eps=0.55, min_points=20))
+    cur_pc1 = cur_pc1[labels1 >= 0]
+
+    pcd2 = o3d.geometry.PointCloud()
+    pcd2.points = o3d.utility.Vector3dVector(cur_pc2)
+    labels2 = np.asarray(pcd2.cluster_dbscan(eps=0.55, min_points=20))
+    cur_pc2 = cur_pc2[labels2 >= 0]
+
+
+    print(len(cur_pc1))
+    pc1 = torch.tensor(cur_pc1).to(torch.float).unsqueeze(0).to(device)
+    pc2 = torch.tensor(cur_pc2).to(torch.float).unsqueeze(0).to(device)
+    with torch.no_grad():
+        cur_sf = model(pc1,pc2,pc1,pc2,5)
+    res_sf[cur_idx_1[labels1 >= 0]] = cur_sf[-1].cpu().detach().numpy()
+    return res_sf
+
 
 def gather_pt(sf, labels, pc1):
     label_sf, label_pt = {}, {}
@@ -137,22 +145,6 @@ def gen_hist(distance_list, title = ''):
     plt.title(title)
     plt.show()
 
-def gen_horizon_mos_mask(label_sf, horizon_threshold):
-    mask_horizon = np.ones(max(label_sf.keys()) + 1)
-    for label_id in label_sf:
-        if label_id < 0: continue
-        w, v = PCA(np.array(label_sf[label_id]))
-        w = w / np.sum(w)
-        v1 = w[0] * v[:, 0]
-        v2 = w[1] * v[:, 1]
-        v3 = w[2] * v[:, 2]
-        main_v = np.abs(v1 + v2 + v3)
-        v_h = np.array([main_v[0], main_v[1], 0])
-        cos_theta = np.dot(main_v, v_h) / (np.linalg.norm(main_v) * np.linalg.norm(v_h))
-        theta = np.arccos(cos_theta) * 180 / np.pi
-        if(np.abs(theta) > horizon_threshold):
-            mask_horizon[label_id] = 0
-    return mask_horizon
 
 def gen_var_mask(label_sf, var_threshold):
     label_sf_var = np.zeros(max(label_sf.keys()) + 1)
@@ -174,22 +166,21 @@ def gen_dis_mask(label_sf, dis_threshold):
     print(mean_norm)
     return label_sf_dis > dis_threshold * mean_norm
 
-def vis_flow(pc1, pc2, sf):
+def vis_flow(pc1, pc2, sf, seg1, seg2):
+    pc1 = pc1[seg1 < 8]
+    pc2 = pc2[seg2 < 8]
+    sf = sf[seg1 < 8]
     vis = o3d.visualization.Visualizer()
     vis.create_window()
-
-    coord = o3d.geometry.TriangleMesh.create_coordinate_frame(size=0.5, origin=[0,0,0])
-    vis.add_geometry(coord)
-
     pcd1 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc1))
-    pcd1.paint_uniform_color([0.25,0.25,0.25])
+    pcd1.paint_uniform_color([1,0,0])
     vis.add_geometry(pcd1)
-    # pcd2 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc2))
-    # pcd2.paint_uniform_color([0,0,1])
-    # vis.add_geometry(pcd2)
-    pcdm = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc1 + sf))
-    pcdm.paint_uniform_color([0,1,0])
-    vis.add_geometry(pcdm)
+    pcd2 = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc2))
+    pcd2.paint_uniform_color([0,0,1])
+    vis.add_geometry(pcd2)
+    # pcdm = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc1 + sf))
+    # pcdm.paint_uniform_color([0,1,0])
+    # vis.add_geometry(pcdm)
 
     dis = np.linalg.norm(sf, axis=1)
     max_dis = np.max(dis)
@@ -208,12 +199,12 @@ def vis_flow(pc1, pc2, sf):
     vis.run()
     vis.destroy_window()
 
-def run(cfg_file = 'cfg/vis_sf_kitti.yaml'):
+def run(cfg_file = '../cfg/sem_box.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
     p1_id = cfg['p1_id']
-    p2_id = cfg['p2_id']
+    p2_id = cfg['p2_id'][0]
     pc_path = cfg['pc_path']
 
     poses = load_poses(cfg['poses_path'])
@@ -224,21 +215,12 @@ def run(cfg_file = 'cfg/vis_sf_kitti.yaml'):
     pc2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[p2_id] @ calib @ pc2.T).T
     pc1 = pc1[:, :3]
     pc2 = pc2[:, :3]
-    pcd1 = o3d.geometry.PointCloud()
-    pcd1.points = o3d.utility.Vector3dVector(pc1)
-    pcd1.estimate_normals()
-    pc1_normals = np.array(pcd1.normals)
-    pc1 = pre_process(pc1, pc1_normals)
-    pcd1.points = o3d.utility.Vector3dVector(pc1)
-
-    pcd2 = o3d.geometry.PointCloud()
-    pcd2.points = o3d.utility.Vector3dVector(pc2)
-    pcd2.estimate_normals()
-    pc2_normals = np.array(pcd2.normals)
-    pc2 = pre_process(pc2, pc2_normals)
-    sf = flow_infer(pc1, pc2, cfg['checkpoint'])
-
-    vis_flow(pc1, pc2, sf)
+    seg1 = np.load(cfg['seg_label'] + f'{p1_id:06d}.npy')
+    seg2 = np.load(cfg['seg_label'] + f'{p2_id:06d}.npy')
+    # pc1, _ = pre_process(pc1, seg1)
+    # pc2, _ = pre_process(pc2, seg2)
+    sf = flow_infer(pc1, pc2, cfg['checkpoint'], seg1, seg2)
+    vis_flow(pc1, pc2, sf, seg1, seg2)
 
 
 

@@ -1,14 +1,5 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import open3d as o3d
 import numpy as np
-import matplotlib.pyplot as plt
-
-cmap = plt.colormaps.get_cmap('rainbow')
-def get_color(c):
-    return cmap(c)[:3]
 
 def str_to_trans(poses):
     return np.vstack((np.fromstring(poses, dtype=float, sep=' ').reshape(3, 4), [0, 0, 0, 1]))
@@ -40,10 +31,14 @@ def open_label(filename):
     sem_label = label & 0xFFFF
     label = [1 if i > 250 else 0 for i in sem_label ]
     return label
+def open_mos(filename, size):
+    mos_id = np.load(filename)
+    label = np.zeros(size)
+    for it in mos_id:
+        label[it] = 1
+    return label
 
 seq = "08"
-vis = o3d.visualization.Visualizer()
-vis.create_window()
 width, height, focal = 1920, 1080, 0.96
 K = [[focal * width, 0, width / 2 - 0.5],
     [0, focal * width, height / 2 -0.5],
@@ -54,9 +49,11 @@ camera.extrinsic = np.array(  [[ 9.99208314e-01,  2.29207597e-02,  3.25174328e-0
                                 [-3.10441364e-02, -6.19408486e-02,  9.97596909e-01, -1.72749819e+01],
                                 [ 2.48798364e-02, -9.97816601e-01, -6.11802557e-02,  1.85796824e+02],
                                 [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00],], dtype=np.float64)
-for f_id in range(100, 170):
+for f_id in range(4009, 4070, 10):
     str_fid = "%06d"%(f_id)
     print(str_fid)
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
 
     scan_path = f'/media/dl/data_pc/semanticKITTI/sequences/{seq}/velodyne/{str_fid}.bin'
     label_path = f'/media/dl/data_pc/semanticKITTI/sequences/{seq}/labels/{str_fid}.label'
@@ -66,7 +63,7 @@ for f_id in range(100, 170):
     pc[:, [1, 2]] = pc[:, [2, 1]]
     pc = (poses[f_id].dot(pc.T)).T
     pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(pc[:, :3]))
-    label = open_label(label_path)
+    label = open_mos(f'/media/dl/data_pc/data_demo/mos_label/08/{f_id:06d}.npy', len(pc))
     colors = []
     for i in range(len(label)):
         if label[i] == 1:
@@ -76,15 +73,8 @@ for f_id in range(100, 170):
     pcd.colors = o3d.utility.Vector3dVector(colors)
     vis.add_geometry(pcd)
 
-    ctr = vis.get_view_control()
-    ctr.convert_from_pinhole_camera_parameters(camera)
-    vis.update_geometry(pcd)
-    vis.poll_events()
-    vis.update_renderer()
-    # vis.capture_screen_image(f'/media/dl/data_pc/data_demo/vis_mos_seq/{f_id:06d}.png')
-    vis.remove_geometry(pcd)
-
-vis.destroy_window()
+    vis.run()
+    vis.destroy_window()
 
 
 

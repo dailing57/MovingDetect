@@ -77,5 +77,3 @@ colors = [color_map[labels[idx]] if labels[idx] >= 0 else [0, 0, 0] for idx in r
 pcd.colors = o3d.utility.Vector3dVector(colors)
 o3d.visualization.draw_geometries([pcd])
 
-# 如果共面，但是方差过大，应该认为是新出现的点
-

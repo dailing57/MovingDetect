@@ -9,8 +9,8 @@ pc_path: "/media/dl/data_pc/semanticKITTI/sequences/08/velodyne/"
 poses_path: "/media/dl/data_pc/semanticKITTI/sequences/08/poses.txt"
 calib_path: "/media/dl/data_pc/semanticKITTI/sequences/08/calib.txt"
 label_path: "/media/dl/data_pc/semanticKITTI/sequences/08/labels/"
-save_label: "/media/dl/data_pc/data_demo/flowstepv2/labels/08/"
+save_label: "/media/dl/data_pc/data_demo/flowstepv2/flow/08/"
 
 dis_threshold: 0.2
 theta_threshold: 60
-num_threshold: 100
+num_threshold: 20

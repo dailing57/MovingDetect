@@ -152,7 +152,7 @@ def gen_pca_mask(label_sf, label_pt_id, sf, theta_threshold = 60, dis_threshold 
         for i in label_pt_id[label_id]:
             cur_dis = np.linalg.norm(sf[i])
             cos_theta = np.dot(v1, sf[i]) / (np.linalg.norm(v1) * cur_dis)
-            mask_pca[i] = (np.abs(cos_theta) < theta_threshold / 180 * np.pi) & (cur_dis > dis_threshold)
+            mask_pca[i] = (np.abs(cos_theta) < theta_threshold / 180 * np.pi) & (cur_dis > dis_threshold) & (cur_dis < 5.0)
     return mask_pca
 
 
@@ -184,6 +184,12 @@ def open_label(filename):
     label = [1 if i > 250 else 0 for i in sem_label ]
     return label
 
+def open_mos(filename, size):
+    mos_id = np.load(filename)
+    label = np.zeros(size)
+    for it in mos_id:
+        label[it] = 1
+    return label
 def run(cfg_file = 'cfg/flowsegv2.yaml'):
     print('running...')
     with open(cfg_file) as file:
@@ -193,11 +199,11 @@ def run(cfg_file = 'cfg/flowsegv2.yaml'):
     pc_path = cfg['pc_path']
     seq_acc = []
     tot_tp, tot_fp, tot_fn = 0, 0, 0
-    for p1_id in range(5, 4071):
+    for p1_id in range(9, 4070, 10):
         p2_id = [p1_id - 2]
-        gt_label = open_label(cfg['label_path'] + f'{p1_id:06d}.label' )
         # pc1 = (poses[p1_id] @ calib @ pc1.T).T
         pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
+        gt_label = open_mos(f'/media/dl/data_pc/data_demo/mos_label/08/{p1_id:06d}.npy', len(pchom1))
         pcd1 = o3d.geometry.PointCloud()
         pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
         pcd1.estimate_normals()

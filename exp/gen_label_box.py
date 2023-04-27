@@ -47,27 +47,14 @@ def flow_infer(pc1_in, pc2_in,ckpt_path, seg1, seg2):
     model.load_state_dict(model_weights)
     model.eval().to(device)
     res_sf = np.zeros((len(pc1_in), 3))
-    cur_idx_1 = np.arange(len(seg1))[(seg1 != 8) & (seg1 != 10)]
-    cur_pc1 = pc1_in[cur_idx_1]
-    cur_pc2 = pc2_in[(seg2 != 8) & (seg2 != 10)]
+    cur_pc1 = pc1_in[seg1]
+    cur_pc2 = pc2_in[seg2]
 
-    pcd1 = o3d.geometry.PointCloud()
-    pcd1.points = o3d.utility.Vector3dVector(cur_pc1)
-    labels1 = np.asarray(pcd1.cluster_dbscan(eps=0.55, min_points=20))
-    cur_pc1 = cur_pc1[labels1 >= 0]
-
-    pcd2 = o3d.geometry.PointCloud()
-    pcd2.points = o3d.utility.Vector3dVector(cur_pc2)
-    labels2 = np.asarray(pcd2.cluster_dbscan(eps=0.55, min_points=20))
-    cur_pc2 = cur_pc2[labels2 >= 0]
-
-
-    print(len(cur_pc1))
     pc1 = torch.tensor(cur_pc1).to(torch.float).unsqueeze(0).to(device)
     pc2 = torch.tensor(cur_pc2).to(torch.float).unsqueeze(0).to(device)
     with torch.no_grad():
         cur_sf = model(pc1,pc2,pc1,pc2,5)
-    res_sf[cur_idx_1[labels1 >= 0]] = cur_sf[-1].cpu().detach().numpy()
+    res_sf[seg1] = cur_sf[-1].cpu().detach().numpy()
     return res_sf
 
 def gather_sf(sf, labels):
@@ -80,9 +67,15 @@ def gather_sf(sf, labels):
     return label_sf
 
 
-def cluster(pc, seg):
-    ori_idx = np.arange(len(pc))[seg < 8]
+def cluster(pc, pc_normals):
+
+    is_not_ground = (pc[:, 2] > -1.5)
+    horizontal_normals = (np.abs(pc_normals[:, -1]) > .85) & (pc[:, 2] < -1.0)
+    is_near = (np.amax(np.abs(pc), axis=1) < 35)
+    mask = is_not_ground & (~horizontal_normals) & is_near
+    ori_idx = np.arange(len(pc))[mask]
     pc = pc[ori_idx]
+
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pc)
     labels = np.asarray(pcd.cluster_dbscan(eps=0.55, min_points=10))
@@ -94,7 +87,7 @@ def cluster(pc, seg):
             labels_ids[labels[i]] = [ori_idx[i]]
         else:
             labels_ids[labels[i]].append(ori_idx[i])
-    return ins, labels_ids
+    return ins, labels_ids, ori_idx
 
 
 def PCA(data):
@@ -105,7 +98,7 @@ def PCA(data):
     eigenvectors = eigenvectors[:, sort]
     return eigenvalues, eigenvectors
 
-def gen_pca_mask(seg, cluster_ids, sf, theta_threshold = 60, dis_threshold_list = [1.0]):
+def gen_pca_mask(cluster_ids, sf, theta_threshold = 60, dis_threshold = 1.0):
     mask_pca = np.zeros(sf.shape[0])
     for label_id in cluster_ids:
         if(len(cluster_ids[label_id]) < 20): continue
@@ -113,32 +106,11 @@ def gen_pca_mask(seg, cluster_ids, sf, theta_threshold = 60, dis_threshold_list 
         v1 = v[:, 0]
 
         for i in cluster_ids[label_id]:
-            dis_threshold = dis_threshold_list[seg[i] in [0, 3, 4]]
             cur_dis = np.linalg.norm(sf[i])
             cos_theta = np.dot(v1, sf[i]) / (np.linalg.norm(v1) * cur_dis)
             mask_pca[i] = (np.abs(cos_theta) < theta_threshold / 180 * np.pi) & (cur_dis > dis_threshold)
         # print(np.sum(mask_pca[cluster_ids[label_id]]) / len(cluster_ids[label_id]))
     return mask_pca
-
-def gen_var_mask(label_sf, var_threshold):
-    label_sf_var = np.zeros(max(label_sf.keys()) + 1)
-    for label_id in label_sf:
-        if label_id < 0: continue
-        label_sf_var[label_id] = np.sum(np.var(label_sf[label_id], axis=1))
-    # gen_hist(label_sf_var, 'var')
-    mean_var = np.mean(label_sf_var)
-    print(mean_var)
-    return label_sf_var < var_threshold * mean_var
-
-def gen_dis_mask(label_sf, dis_threshold):
-    label_sf_dis = np.zeros(max(label_sf.keys()) + 1)
-    for label_id in label_sf:
-        if label_id < 0: continue
-        label_sf_dis[label_id] = np.linalg.norm(np.mean(label_sf[label_id], axis=1))
-    # gen_hist(label_sf_dis, 'dis')
-    mean_norm = np.mean(label_sf_dis)
-    print(mean_norm)
-    return label_sf_dis > dis_threshold * mean_norm
 
 def iou(box1, box2):
     box1 = MultiPoint(box1[:, :2]).convex_hull
@@ -146,7 +118,6 @@ def iou(box1, box2):
     inter = box1.intersection(box2).area
     union = box1.area + box2.area - inter
     iou = inter / union
-
     return iou
 
 def gen_box(labels, pc):
@@ -156,7 +127,10 @@ def gen_box(labels, pc):
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(np.asarray(pc[labels[i]]))
             bbox = pcd.get_oriented_bounding_box()
-            box[i] = np.asarray(bbox.get_box_points())
+            extent = bbox.extent
+            axis_lengths = [2 * extent[i] for i in range(3)]
+            if all([axis_lengths[i] < 15.0 for i in range(3)]):
+                box[i] = np.asarray(bbox.get_box_points())
     return box
 
 def open_label(filename):
@@ -174,8 +148,7 @@ def open_mos(filename, size):
         label[it] = 1
     return label
 
-
-def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
+def run(cfg_file = 'cfg/box.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
@@ -185,46 +158,51 @@ def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
     seq_acc = []
     tot_tp, tot_fp, tot_fn = 0, 0, 0
     for p1_id in range(9, 4071, 10):
-        seg1 = np.load(cfg['seg_label'] + f'{p1_id:06d}.npy')
-
         p2_id = [p1_id - cfg['skip_n']]
         pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
-        labels1, cluster_ids1 = cluster(pchom1[:, :3], seg1)
+        pcd1 = o3d.geometry.PointCloud()
+        pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
+        pcd1.estimate_normals()
+        pc1_normals = np.array(pcd1.normals)
+        ins1, cluster_ids1, ori_idx1 = cluster(pchom1[:, :3], pc1_normals)
         box1 = gen_box(cluster_ids1, pchom1[:, :3])
 
         mask = np.zeros(len(pchom1))
         for idx in p2_id:
             pchom2 = load_vertex(pc_path + f'{idx:06d}.bin')
-            seg2 = np.load(cfg['seg_label'] + f'{idx:06d}.npy')
+            pcd2 = o3d.geometry.PointCloud()
+            pcd2.points = o3d.utility.Vector3dVector(pchom2[:, :3])
+            pcd2.estimate_normals()
+            pc2_normals = np.array(pcd2.normals)
             pchom2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
-            _, cluster_ids2 = cluster(pchom2[:, :3], seg2)
+            _, cluster_ids2, ori_idx2 = cluster(pchom2[:, :3], pc2_normals)
             box2 = gen_box(cluster_ids2, pchom2[:, :3])
             mask_iou = {}
             for i in box1:
                 mask_iou[i] = 1
                 for j in box2:
-                    if iou(box1[i], box2[j]) > cfg['iou_threshold'][seg1[cluster_ids1[i][0]] in [0, 3, 4]]:
+                    if iou(box1[i], box2[j]) > cfg['iou_threshold']:
                         mask_iou[i] = 0
 
-            sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], seg1, seg2)
+            sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], ori_idx1, ori_idx2)
             
-            mask_pca = gen_pca_mask(seg1, cluster_ids1, sf, cfg['theta_threshold'],cfg['dis_threshold'])
+            mask_pca = gen_pca_mask(cluster_ids1, sf, cfg['theta_threshold'],cfg['dis_threshold'])
             for i in range(len(mask_pca)):
                 if(mask_pca[i] == 1 and 
-                (i in labels1) and 
-                (labels1[i] in mask_iou) and 
-                mask_iou[labels1[i]] == 1):
+                (i in ins1) and 
+                (ins1[i] in mask_iou) and 
+                mask_iou[ins1[i]] == 1):
                     mask[i] += 1
 
         tot = len(p2_id)
 
         is_mos = np.zeros(len(pchom1))
         for i in cluster_ids1:
-            if (len(cluster_ids1[i]) >= cfg['num_threshold'][seg1[cluster_ids1[i][0]] in [0, 3, 4]] and 
+            if (len(cluster_ids1[i]) >= cfg['num_threshold'] and 
                 np.sum(mask[cluster_ids1[i]]) / (tot * len(cluster_ids1[i])) > cfg['check_ratio']):
                 is_mos[cluster_ids1[i]] = 1
 
-        gt_label = open_mos(f'/media/dl/data_pc/data_demo/mos_label/08/{p1_id:06d}.npy', len(pchom1))
+        gt_label = open_mos(cfg['label_path'] + f'{p1_id:06d}.npy', len(pchom1))
         tp, fp, fn = 0, 0, 0
         for i in range(len(is_mos)):
             if(is_mos[i] == 1 and gt_label[i] == 1):
@@ -240,9 +218,6 @@ def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
         seq_acc.append(tp / (tp + fp + fn))
 
         print(p1_id, sum(seq_acc) / len(seq_acc), tot_tp/(tot_tp+tot_fn+tot_fp))
-        np.save(cfg['save_label'] + f'{p1_id:06d}', is_mos)
-
-    print(sum(seq_acc) / len(seq_acc))
 
 if __name__ == '__main__':
     run()

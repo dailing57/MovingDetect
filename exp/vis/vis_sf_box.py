@@ -1,6 +1,6 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import open3d as o3d
 import numpy as np
@@ -96,32 +96,14 @@ def flow_infer(pc1_in, pc2_in,ckpt_path, seg1, seg2):
     model.load_state_dict(model_weights)
     model.eval().to(device)
     res_sf = np.zeros((len(pc1_in), 3))
-    for i in range(8):
-        cur_idx_1 = np.arange(len(seg1))[seg1 == i]
-        cur_pc1 = pc1_in[cur_idx_1]
-        cur_pc2 = pc2_in[seg2 == i]
+    cur_pc1 = pc1_in[seg1]
+    cur_pc2 = pc2_in[seg2]
 
-        if (len(cur_pc1) < 100): continue
-        pcd1 = o3d.geometry.PointCloud()
-        pcd1.points = o3d.utility.Vector3dVector(cur_pc1)
-        labels1 = np.asarray(pcd1.cluster_dbscan(eps=0.55, min_points=20))
-        cur_pc1 = cur_pc1[labels1 >= 0]
-        if (len(cur_pc1) < 100): continue
-
-        if(len(cur_pc2) < 100): continue
-        pcd2 = o3d.geometry.PointCloud()
-        pcd2.points = o3d.utility.Vector3dVector(cur_pc2)
-        labels2 = np.asarray(pcd2.cluster_dbscan(eps=0.55, min_points=20))
-        cur_pc2 = cur_pc2[labels2 >= 0]
-        if(len(cur_pc2) < 100): continue
-
-
-        print(len(cur_pc1))
-        pc1 = torch.tensor(cur_pc1).to(torch.float).unsqueeze(0).to(device)
-        pc2 = torch.tensor(cur_pc2).to(torch.float).unsqueeze(0).to(device)
-        with torch.no_grad():
-            cur_sf = model(pc1,pc2,pc1,pc2,5)
-        res_sf[cur_idx_1[labels1 >= 0]] = cur_sf[-1].cpu().detach().numpy()
+    pc1 = torch.tensor(cur_pc1).to(torch.float).unsqueeze(0).to(device)
+    pc2 = torch.tensor(cur_pc2).to(torch.float).unsqueeze(0).to(device)
+    with torch.no_grad():
+        cur_sf = model(pc1,pc2,pc1,pc2,5)
+    res_sf[seg1] = cur_sf[-1].cpu().detach().numpy()
     return res_sf
 
 
@@ -204,12 +186,12 @@ def vis_flow(pc1, pc2, sf, seg1, seg2):
     vis.run()
     vis.destroy_window()
 
-def run(cfg_file = 'cfg/vis_sf_kitti_trans.yaml'):
+def run(cfg_file = '../cfg/box.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
     p1_id = cfg['p1_id']
-    p2_id = cfg['p2_id']
+    p2_id = p1_id - cfg['skip_n']
     pc_path = cfg['pc_path']
 
     poses = load_poses(cfg['poses_path'])

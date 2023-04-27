@@ -1,6 +1,6 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import open3d as o3d
 import numpy as np
@@ -47,27 +47,14 @@ def flow_infer(pc1_in, pc2_in,ckpt_path, seg1, seg2):
     model.load_state_dict(model_weights)
     model.eval().to(device)
     res_sf = np.zeros((len(pc1_in), 3))
-    cur_idx_1 = np.arange(len(seg1))[(seg1 != 8) & (seg1 != 10)]
-    cur_pc1 = pc1_in[cur_idx_1]
-    cur_pc2 = pc2_in[(seg2 != 8) & (seg2 != 10)]
+    cur_pc1 = pc1_in[seg1]
+    cur_pc2 = pc2_in[seg2]
 
-    pcd1 = o3d.geometry.PointCloud()
-    pcd1.points = o3d.utility.Vector3dVector(cur_pc1)
-    labels1 = np.asarray(pcd1.cluster_dbscan(eps=0.55, min_points=20))
-    cur_idx_1 = cur_idx_1[labels1 >= 0]
-    cur_pc1 = cur_pc1[labels1 >= 0]
-
-    pcd2 = o3d.geometry.PointCloud()
-    pcd2.points = o3d.utility.Vector3dVector(cur_pc2)
-    labels2 = np.asarray(pcd2.cluster_dbscan(eps=0.55, min_points=20))
-    cur_pc2 = cur_pc2[labels2 >= 0]
-
-    print(len(cur_pc1))
     pc1 = torch.tensor(cur_pc1).to(torch.float).unsqueeze(0).to(device)
     pc2 = torch.tensor(cur_pc2).to(torch.float).unsqueeze(0).to(device)
     with torch.no_grad():
         cur_sf = model(pc1,pc2,pc1,pc2,5)
-    res_sf[cur_idx_1] = cur_sf[-1].cpu().detach().numpy()
+    res_sf[seg1] = cur_sf[-1].cpu().detach().numpy()
     return res_sf
 
 def gather_sf(sf, labels):
@@ -79,9 +66,15 @@ def gather_sf(sf, labels):
             label_sf[labels[i]].append(sf[i])
     return label_sf
 
-def cluster(pc, seg):
-    ori_idx = np.arange(len(pc))[seg < 8]
+
+def cluster(pc, pc_normals):
+    is_not_ground = (pc[:, 2] > -1.5)
+    horizontal_normals = (np.abs(pc_normals[:, -1]) > .85) & (pc[:, 2] < -1.0)
+    is_near = (np.amax(np.abs(pc), axis=1) < 35)
+    mask = is_not_ground & (~horizontal_normals) & is_near
+    ori_idx = np.arange(len(pc))[mask]
     pc = pc[ori_idx]
+
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(pc)
     labels = np.asarray(pcd.cluster_dbscan(eps=0.55, min_points=10))
@@ -93,7 +86,7 @@ def cluster(pc, seg):
             labels_ids[labels[i]] = [ori_idx[i]]
         else:
             labels_ids[labels[i]].append(ori_idx[i])
-    return ins, labels_ids
+    return ins, labels_ids, ori_idx
 
 
 def PCA(data):
@@ -104,7 +97,7 @@ def PCA(data):
     eigenvectors = eigenvectors[:, sort]
     return eigenvalues, eigenvectors
 
-def gen_pca_mask(seg, cluster_ids, sf, theta_threshold = 60, dis_threshold_list = [1.0]):
+def gen_pca_mask(cluster_ids, sf, theta_threshold = 60, dis_threshold = 1.0):
     mask_pca = np.zeros(sf.shape[0])
     for label_id in cluster_ids:
         if(len(cluster_ids[label_id]) < 20): continue
@@ -112,33 +105,11 @@ def gen_pca_mask(seg, cluster_ids, sf, theta_threshold = 60, dis_threshold_list 
         v1 = v[:, 0]
 
         for i in cluster_ids[label_id]:
-            dis_threshold = dis_threshold_list[seg[i] in [0, 3, 4]]
             cur_dis = np.linalg.norm(sf[i])
             cos_theta = np.dot(v1, sf[i]) / (np.linalg.norm(v1) * cur_dis)
             mask_pca[i] = (np.abs(cos_theta) < theta_threshold / 180 * np.pi) & (cur_dis > dis_threshold)
         # print(np.sum(mask_pca[cluster_ids[label_id]]) / len(cluster_ids[label_id]))
     return mask_pca
-
-
-def gen_var_mask(label_sf, var_threshold):
-    label_sf_var = np.zeros(max(label_sf.keys()) + 1)
-    for label_id in label_sf:
-        if label_id < 0: continue
-        label_sf_var[label_id] = np.sum(np.var(label_sf[label_id], axis=1))
-    # gen_hist(label_sf_var, 'var')
-    mean_var = np.mean(label_sf_var)
-    print(mean_var)
-    return label_sf_var < var_threshold * mean_var
-
-def gen_dis_mask(label_sf, dis_threshold):
-    label_sf_dis = np.zeros(max(label_sf.keys()) + 1)
-    for label_id in label_sf:
-        if label_id < 0: continue
-        label_sf_dis[label_id] = np.linalg.norm(np.mean(label_sf[label_id], axis=1))
-    # gen_hist(label_sf_dis, 'dis')
-    mean_norm = np.mean(label_sf_dis)
-    print(mean_norm)
-    return label_sf_dis > dis_threshold * mean_norm
 
 def iou(box1, box2):
     box1 = MultiPoint(box1[:, :2]).convex_hull
@@ -148,64 +119,95 @@ def iou(box1, box2):
     iou = inter / union
     return iou
 
-
-def gen_box(labels, pc):
+def gen_box(labels, pc, vis, fg):
     box = {}
     for i in labels:
         if len(labels[i]) > 20:
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(np.asarray(pc[labels[i]]))
-            bbox = pcd.get_oriented_bounding_box()
-            box[i] = np.asarray(bbox.get_box_points())
+            bbox = pcd.get_axis_aligned_bounding_box()
+            # extent = bbox.extent
+            # axis_lengths = [2 * extent[i] for i in range(3)]
+            # if all([axis_lengths[i] < 10.0 for i in range(3)]):
+            x_len = bbox.max_bound[0] - bbox.min_bound[0]
+            y_len = bbox.max_bound[1] - bbox.min_bound[1]
+            z_len = bbox.max_bound[2] - bbox.min_bound[2]
+
+            if x_len < 5 and y_len < 5 and z_len < 5:
+                box[i] = np.asarray(bbox.get_box_points())
+                bbox.color = (1, 0, 0) if fg == 1 else (0, 0, 1)
+                vis.add_geometry(bbox)
     return box
 
-def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
+def open_label(filename):
+    label = np.fromfile(filename, dtype=np.uint32)
+    label = label.reshape((-1))
+
+    sem_label = label & 0xFFFF
+    label = [1 if i > 250 else 0 for i in sem_label ]
+    return label
+
+def open_mos(filename, size):
+    mos_id = np.load(filename)
+    label = np.zeros(size)
+    for it in mos_id:
+        label[it] = 1
+    return label
+
+def run(cfg_file = '../cfg/box.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
-    p1_id = cfg['p1_id']
-    p2_id = cfg['p2_id']
-    pc_path = cfg['pc_path']
-    seg1 = np.load(cfg['seg_label'] + f'{p1_id:06d}.npy')
     poses = load_poses(cfg['poses_path'])
     calib = load_calib(cfg['calib_path'])
-    pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
+    pc_path = cfg['pc_path']
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
 
-    labels1, cluster_ids1 = cluster(pchom1[:, :3], seg1)
-    box1 = gen_box(cluster_ids1, pchom1[:, :3])
+    p1_id = cfg['p1_id']
+    p2_id = [p1_id - cfg['skip_n']]
+    pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
+    pcd1 = o3d.geometry.PointCloud()
+    pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
+    pcd1.estimate_normals()
+    pc1_normals = np.array(pcd1.normals)
+    ins1, cluster_ids1, ori_idx1 = cluster(pchom1[:, :3], pc1_normals)
+    box1 = gen_box(cluster_ids1, pchom1[:, :3], vis, 1)
 
     mask = np.zeros(len(pchom1))
     for idx in p2_id:
         pchom2 = load_vertex(pc_path + f'{idx:06d}.bin')
-        seg2 = np.load(cfg['seg_label'] + f'{idx:06d}.npy')
+        pcd2 = o3d.geometry.PointCloud()
+        pcd2.points = o3d.utility.Vector3dVector(pchom2[:, :3])
+        pcd2.estimate_normals()
+        pc2_normals = np.array(pcd2.normals)
         pchom2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
-        _, cluster_ids2 = cluster(pchom2[:, :3], seg2)
-        box2 = gen_box(cluster_ids2, pchom2[:, :3])
+        _, cluster_ids2, ori_idx2 = cluster(pchom2[:, :3], pc2_normals)
+        box2 = gen_box(cluster_ids2, pchom2[:, :3], vis, 2)
         mask_iou = {}
         for i in box1:
             mask_iou[i] = 1
             for j in box2:
-                if iou(box1[i], box2[j]) > cfg['iou_threshold'][seg1[cluster_ids1[i][0]] in [0, 3, 4]]:
+                if iou(box1[i], box2[j]) > cfg['iou_threshold']:
                     mask_iou[i] = 0
 
-        sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], seg1, seg2)
-
-        mask_pca = gen_pca_mask(seg1, cluster_ids1, sf, cfg['theta_threshold'],cfg['dis_threshold'])
+        sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], ori_idx1, ori_idx2)
+        
+        mask_pca = gen_pca_mask(cluster_ids1, sf, cfg['theta_threshold'],cfg['dis_threshold'])
         for i in range(len(mask_pca)):
             if(mask_pca[i] == 1 and 
-               (i in labels1) and 
-               (labels1[i] in mask_iou) and 
-               mask_iou[labels1[i]] == 1):
+            (i in ins1) and 
+            (ins1[i] in mask_iou) and 
+            mask_iou[ins1[i]] == 1):
                 mask[i] += 1
 
     tot = len(p2_id)
 
     is_mos = np.zeros(len(pchom1))
     for i in cluster_ids1:
-        if (len(cluster_ids1[i]) >= cfg['num_threshold'][seg1[cluster_ids1[i][0]] in [0, 3, 4]] and 
+        if (len(cluster_ids1[i]) >= cfg['num_threshold'] and 
             np.sum(mask[cluster_ids1[i]]) / (tot * len(cluster_ids1[i])) > cfg['check_ratio']):
             is_mos[cluster_ids1[i]] = 1
-
 
     colors = np.array([[0.25, 0.25, 0.25] for i in range(len(pchom1))])
     for i in range(len(is_mos)):
@@ -215,32 +217,9 @@ def run(cfg_file = 'cfg/flowsegv2trans.yaml'):
     pcd1 = o3d.geometry.PointCloud()
     pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
     pcd1.colors = o3d.utility.Vector3dVector(np.array(colors))
-    vis = o3d.visualization.Visualizer()
-    vis.create_window()
     vis.add_geometry(pcd1)
-    # width, height, focal = 800, 600, 0.96
-    # K = [[focal * width, 0, width / 2 - 0.5],
-    #     [0, focal * width, height / 2 -0.5],
-    #     [0, 0, 1]]
-    # camera = o3d.camera.PinholeCameraParameters()
-    # camera.intrinsic = o3d.camera.PinholeCameraIntrinsic(width=width, height=height, fx=K[0][0], fy=K[1][1], cx=K[0][2], cy=K[1][2])
-    # camera.extrinsic = np.array( [[-9.40456774e-01,  3.32088603e-01,  7.25135505e-02, -8.86299589e-01],
-    #                               [-5.55180191e-03,  1.98294206e-01, -9.80126821e-01,  1.43469784e+01],
-    #                               [-3.39867964e-01, -9.22169490e-01, -1.84643440e-01,  3.88750768e+01],
-    #                               [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00],], dtype=np.float64)
-
-    # ctr = vis.get_view_control()
-    # ctr.convert_from_pinhole_camera_parameters(camera)
-
     vis.run()
-    # params = vis.get_view_control().convert_to_pinhole_camera_parameters()
-    # print("View Matrix:\n", params.extrinsic)
-    # print("Projection Matrix:\n", params.intrinsic)
-    # float_buffer = np.array(vis.capture_screen_float_buffer(True))
-
     vis.destroy_window()
-    # image = Image.fromarray((float_buffer * 255).astype('uint8'))
-    # image.save('image.png')
 
 if __name__ == '__main__':
     run()
