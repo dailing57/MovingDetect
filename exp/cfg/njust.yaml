@@ -1,0 +1,14 @@
+p1_id: 506
+
+checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-04-05_20-02/epoch=9.ckpt"
+
+pc_path: "/media/dl/data_pc/data_demo/MotionSeg3D/data/sequences/09/velodyne/" #scans_506.bin
+poses_path: "/media/dl/data_pc/data_demo/MotionSeg3D/data/sequences/09/poses.txt"
+calib_path: "/media/dl/data_pc/data_demo/MotionSeg3D/data/sequences/09/calib.txt"
+
+dis_threshold: 0.2
+num_threshold: 20
+iou_threshold: 0.9
+theta_threshold: 60
+skip_n: 2
+check_ratio: 0.8

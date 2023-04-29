@@ -1,4 +1,4 @@
-p1_id: 869
+p1_id: 359
 
 checkpoint: "/media/dl/data_pc/ckpt/flowstep3d_finetune/2023-04-07_00-56/last.ckpt"
 
@@ -9,9 +9,9 @@ label_path: "/media/dl/data_pc/data_demo/mos_label/08/"
 save_label: "/media/dl/data_pc/data_demo/flowstepv2/sem_iou_flow/08/"
 seg_label: "/media/dl/data_pc/data_demo/sphereformer_label/08/"
 
-dis_threshold: 1.0
+dis_threshold: 0.7
 num_threshold: 20
-iou_threshold: 0.5
+iou_threshold: 0.9
 theta_threshold: 60
 skip_n: 2
 check_ratio: 0.8

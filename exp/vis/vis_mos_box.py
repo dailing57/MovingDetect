@@ -125,15 +125,18 @@ def gen_box(labels, pc, vis, fg):
         if len(labels[i]) > 20:
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(np.asarray(pc[labels[i]]))
-            bbox = pcd.get_axis_aligned_bounding_box()
-            # extent = bbox.extent
-            # axis_lengths = [2 * extent[i] for i in range(3)]
-            # if all([axis_lengths[i] < 10.0 for i in range(3)]):
-            x_len = bbox.max_bound[0] - bbox.min_bound[0]
-            y_len = bbox.max_bound[1] - bbox.min_bound[1]
-            z_len = bbox.max_bound[2] - bbox.min_bound[2]
-
-            if x_len < 5 and y_len < 5 and z_len < 5:
+            # bbox = pcd.get_axis_aligned_bounding_box()
+            # x_len = bbox.max_bound[0] - bbox.min_bound[0]
+            # y_len = bbox.max_bound[1] - bbox.min_bound[1]
+            # z_len = bbox.max_bound[2] - bbox.min_bound[2]
+            # vol = x_len * y_len * z_len
+            # if x_len < 5 and y_len < 5 and z_len < 5 and vol < 20 and vol > 2:
+            bbox = pcd.get_oriented_bounding_box()
+            extent = bbox.extent
+            axis_lengths = [2 * extent[i] for i in range(3)]
+            vol = axis_lengths[0] * axis_lengths[1] * axis_lengths[2]
+            if all([axis_lengths[i] < 10.0 and axis_lengths[i] > 1.0 for i in range(3)]) and vol < 150 and vol > 5 and bbox.center[2] < 1:
+                box[i] = np.asarray(bbox.get_box_points())
                 box[i] = np.asarray(bbox.get_box_points())
                 bbox.color = (1, 0, 0) if fg == 1 else (0, 0, 1)
                 vis.add_geometry(bbox)
@@ -187,9 +190,11 @@ def run(cfg_file = '../cfg/box.yaml'):
         mask_iou = {}
         for i in box1:
             mask_iou[i] = 1
+            cur_iou = 0
             for j in box2:
-                if iou(box1[i], box2[j]) > cfg['iou_threshold']:
-                    mask_iou[i] = 0
+                cur_iou = max(cur_iou, iou(box1[i], box2[j]))
+            if cur_iou > cfg['iou_threshold'] or cur_iou < 0.01:
+                mask_iou[i] = 0
 
         sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], ori_idx1, ori_idx2)
         

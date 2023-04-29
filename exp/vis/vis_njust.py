@@ -1,6 +1,6 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import open3d as o3d
 import numpy as np
@@ -68,7 +68,6 @@ def gather_sf(sf, labels):
 
 
 def cluster(pc, pc_normals):
-
     is_not_ground = (pc[:, 2] > -1.5)
     horizontal_normals = (np.abs(pc_normals[:, -1]) > .85) & (pc[:, 2] < -1.0)
     is_near = (np.amax(np.abs(pc), axis=1) < 35)
@@ -120,18 +119,27 @@ def iou(box1, box2):
     iou = inter / union
     return iou
 
-def gen_box(labels, pc):
+def gen_box(labels, pc, vis, fg):
     box = {}
     for i in labels:
         if len(labels[i]) > 20:
             pcd = o3d.geometry.PointCloud()
             pcd.points = o3d.utility.Vector3dVector(np.asarray(pc[labels[i]]))
+            # bbox = pcd.get_axis_aligned_bounding_box()
+            # x_len = bbox.max_bound[0] - bbox.min_bound[0]
+            # y_len = bbox.max_bound[1] - bbox.min_bound[1]
+            # z_len = bbox.max_bound[2] - bbox.min_bound[2]
+            # vol = x_len * y_len * z_len
+            # if x_len < 5 and y_len < 5 and z_len < 5 and vol < 20 and vol > 2:
             bbox = pcd.get_oriented_bounding_box()
             extent = bbox.extent
             axis_lengths = [2 * extent[i] for i in range(3)]
             vol = axis_lengths[0] * axis_lengths[1] * axis_lengths[2]
             if all([axis_lengths[i] < 10.0 and axis_lengths[i] > 1.0 for i in range(3)]) and vol < 150 and vol > 5 and bbox.center[2] < 1:
                 box[i] = np.asarray(bbox.get_box_points())
+                box[i] = np.asarray(bbox.get_box_points())
+                bbox.color = (1, 0, 0) if fg == 1 else (0, 0, 1)
+                vis.add_geometry(bbox)
     return box
 
 def open_label(filename):
@@ -149,78 +157,74 @@ def open_mos(filename, size):
         label[it] = 1
     return label
 
-def run(cfg_file = 'cfg/box.yaml'):
+def run(cfg_file = '../cfg/njust.yaml'):
     print('running...')
     with open(cfg_file) as file:
         cfg = yaml.safe_load(file)
     poses = load_poses(cfg['poses_path'])
     calib = load_calib(cfg['calib_path'])
     pc_path = cfg['pc_path']
-    seq_acc = []
-    tot_tp, tot_fp, tot_fn = 0, 0, 0
-    for p1_id in range(9, 4071, 10):
-        p2_id = [p1_id - cfg['skip_n']]
-        pchom1 = load_vertex(pc_path + f'{p1_id:06d}.bin')
-        pcd1 = o3d.geometry.PointCloud()
-        pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
-        pcd1.estimate_normals()
-        pc1_normals = np.array(pcd1.normals)
-        ins1, cluster_ids1, ori_idx1 = cluster(pchom1[:, :3], pc1_normals)
-        box1 = gen_box(cluster_ids1, pchom1[:, :3])
+    vis = o3d.visualization.Visualizer()
+    vis.create_window()
 
-        mask = np.zeros(len(pchom1))
-        for idx in p2_id:
-            pchom2 = load_vertex(pc_path + f'{idx:06d}.bin')
-            pcd2 = o3d.geometry.PointCloud()
-            pcd2.points = o3d.utility.Vector3dVector(pchom2[:, :3])
-            pcd2.estimate_normals()
-            pc2_normals = np.array(pcd2.normals)
-            pchom2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
-            _, cluster_ids2, ori_idx2 = cluster(pchom2[:, :3], pc2_normals)
-            box2 = gen_box(cluster_ids2, pchom2[:, :3])
-            mask_iou = {}
-            for i in box1:
-                mask_iou[i] = 1
+    p1_id = cfg['p1_id']
+    p2_id = [p1_id - cfg['skip_n']]
+    pchom1 = load_vertex(pc_path + f'scans_{p1_id}.bin')
+    pcd1 = o3d.geometry.PointCloud()
+    pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
+    pcd1.estimate_normals()
+    pc1_normals = np.array(pcd1.normals)
+    ins1, cluster_ids1, ori_idx1 = cluster(pchom1[:, :3], pc1_normals)
+    box1 = gen_box(cluster_ids1, pchom1[:, :3], vis, 1)
+
+    mask = np.zeros(len(pchom1))
+    for idx in p2_id:
+        pchom2 = load_vertex(pc_path + f'scans_{idx}.bin')
+        pcd2 = o3d.geometry.PointCloud()
+        pcd2.points = o3d.utility.Vector3dVector(pchom2[:, :3])
+        pcd2.estimate_normals()
+        pc2_normals = np.array(pcd2.normals)
+        pchom2 = (np.linalg.inv(poses[p1_id] @ calib) @ poses[idx] @ calib @ pchom2.T).T
+        _, cluster_ids2, ori_idx2 = cluster(pchom2[:, :3], pc2_normals)
+        box2 = gen_box(cluster_ids2, pchom2[:, :3], vis, 2)
+        mask_iou = {}
+        for i in box1:
+            mask_iou[i] = 1
             cur_iou = 0
             for j in box2:
                 cur_iou = max(cur_iou, iou(box1[i], box2[j]))
             if cur_iou > cfg['iou_threshold'] or cur_iou < 0.01:
                 mask_iou[i] = 0
 
-            sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], ori_idx1, ori_idx2)
-            
-            mask_pca = gen_pca_mask(cluster_ids1, sf, cfg['theta_threshold'],cfg['dis_threshold'])
-            for i in range(len(mask_pca)):
-                if(mask_pca[i] == 1 and 
-                (i in ins1) and 
-                (ins1[i] in mask_iou) and 
-                mask_iou[ins1[i]] == 1):
-                    mask[i] += 1
+        sf = flow_infer(pchom1[:, :3], pchom2[:, :3], cfg['checkpoint'], ori_idx1, ori_idx2)
+        
+        mask_pca = gen_pca_mask(cluster_ids1, sf, cfg['theta_threshold'],cfg['dis_threshold'])
+        for i in range(len(mask_pca)):
+            if(mask_pca[i] == 1 and 
+            (i in ins1) and 
+            (ins1[i] in mask_iou) and 
+            mask_iou[ins1[i]] == 1):
+                mask[i] += 1
 
-        tot = len(p2_id)
+    tot = len(p2_id)
 
-        is_mos = np.zeros(len(pchom1))
-        for i in cluster_ids1:
-            if (len(cluster_ids1[i]) >= cfg['num_threshold'] and 
-                np.sum(mask[cluster_ids1[i]]) / (tot * len(cluster_ids1[i])) > cfg['check_ratio']):
-                is_mos[cluster_ids1[i]] = 1
+    is_mos = np.zeros(len(pchom1))
+    for i in cluster_ids1:
+        if (len(cluster_ids1[i]) >= cfg['num_threshold'] and 
+            np.sum(mask[cluster_ids1[i]]) / (tot * len(cluster_ids1[i])) > cfg['check_ratio']):
+            is_mos[cluster_ids1[i]] = 1
 
-        gt_label = open_mos(cfg['label_path'] + f'{p1_id:06d}.npy', len(pchom1))
-        tp, fp, fn = 0, 0, 0
-        for i in range(len(is_mos)):
-            if(is_mos[i] == 1 and gt_label[i] == 1):
-                tp+=1
-            elif (is_mos[i] == 1 and gt_label[i] == 0):
-                fp+=1
-            elif (is_mos[i] == 0 and gt_label[i] == 1):
-                fn+=1
-        tot_tp += tp
-        tot_fn += fn
-        tot_fp += fp
-        if tp + fp + fn == 0: continue
-        seq_acc.append(tp / (tp + fp + fn))
+    colors = np.array([[0.25, 0.25, 0.25] for i in range(len(pchom1))])
+    for i in range(len(is_mos)):
+        if(is_mos[i] == 1):
+            colors[i] = [1, 0, 0]
 
-        print(p1_id, sum(seq_acc) / len(seq_acc), tot_tp/(tot_tp+tot_fn+tot_fp))
+    pcd1 = o3d.geometry.PointCloud()
+    pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
+    pcd1.colors = o3d.utility.Vector3dVector(np.array(colors))
+    vis.add_geometry(pcd1)
+    vis.run()
+    vis.destroy_window()
 
 if __name__ == '__main__':
     run()
