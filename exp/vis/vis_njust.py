@@ -8,6 +8,7 @@ import torch
 from models.flowstep3d import FlowStep3D
 import yaml
 from shapely.geometry import MultiPoint
+from PIL import Image
 
 
 device = torch.device('cuda')
@@ -138,8 +139,8 @@ def gen_box(labels, pc, vis, fg):
             if all([axis_lengths[i] < 10.0 and axis_lengths[i] > 1.0 for i in range(3)]) and vol < 150 and vol > 5 and bbox.center[2] < 1:
                 box[i] = np.asarray(bbox.get_box_points())
                 box[i] = np.asarray(bbox.get_box_points())
-                bbox.color = (1, 0, 0) if fg == 1 else (0, 0, 1)
-                vis.add_geometry(bbox)
+                # bbox.color = (1, 0, 0) if fg == 1 else (0, 0, 1)
+                # vis.add_geometry(bbox)
     return box
 
 def open_label(filename):
@@ -222,9 +223,31 @@ def run(cfg_file = '../cfg/njust.yaml'):
     pcd1 = o3d.geometry.PointCloud()
     pcd1.points = o3d.utility.Vector3dVector(pchom1[:, :3])
     pcd1.colors = o3d.utility.Vector3dVector(np.array(colors))
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(width=800, height=600)
     vis.add_geometry(pcd1)
-    vis.run()
-    vis.destroy_window()
+    width, height, focal = 800, 600, 0.96
+    K = [[focal * width, 0, width / 2 - 0.5],
+        [0, focal * width, height / 2 -0.5],
+        [0, 0, 1]]
+    camera = o3d.camera.PinholeCameraParameters()
+    camera.intrinsic = o3d.camera.PinholeCameraIntrinsic(width=width, height=height, fx=K[0][0], fy=K[1][1], cx=K[0][2], cy=K[1][2])
+    camera.extrinsic = np.array( [[-9.40456774e-01,  3.32088603e-01,  7.25135505e-02, -8.86299589e-01],
+                                  [-5.55180191e-03,  1.98294206e-01, -9.80126821e-01,  1.43469784e+01],
+                                  [-3.39867964e-01, -9.22169490e-01, -1.84643440e-01,  3.88750768e+01],
+                                  [ 0.00000000e+00,  0.00000000e+00,  0.00000000e+00,  1.00000000e+00],], dtype=np.float64)
 
+    ctr = vis.get_view_control()
+    ctr.convert_from_pinhole_camera_parameters(camera)
+
+    vis.run()
+    params = vis.get_view_control().convert_to_pinhole_camera_parameters()
+    print("View Matrix:\n", params.extrinsic)
+    print("Projection Matrix:\n", params.intrinsic)
+    float_buffer = np.array(vis.capture_screen_float_buffer(True))
+
+    vis.destroy_window()
+    image = Image.fromarray((float_buffer * 255).astype('uint8'))
+    image.save('image.png')
 if __name__ == '__main__':
     run()
